@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  ARECF (Acuse de Recibo de e-CF) v1.0
+  Reconstruido localmente a partir de la estructura oficial documentada por la DGII
+  (Informe Técnico e-CF v1.0, Formato Acuse de Recibo v1.0) y confirmada por
+  implementaciones de referencia (github.com/victors1681/dgii-ecf, Alanube, The
+  Factory HKA). Los tipos de datos se reutilizan VERBATIM del ACECF-v.1.0.xsd ya
+  validado en este motor (mismas validaciones de RNC, fecha-hora, versión).
+
+  Estado (EstadoAcuseType): 0 = e-CF Recibido ; 1 = e-CF No Recibido.
+  CodigoMotivoNoRecibido (solo si Estado=1):
+    1 Error de especificación | 2 Error de Firma Digital |
+    3 Envío duplicado        | 4 RNC Comprador no corresponde
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="ARECF">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="DetalleAcusedeRecibo" maxOccurs="1">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Version" type="versionType" minOccurs="1" maxOccurs="1"/>
+              <xs:element name="RNCEmisor" type="RNCValidation" minOccurs="1" maxOccurs="1"/>
+              <xs:element name="RNCComprador" type="RNCValidation" minOccurs="1" maxOccurs="1"/>
+              <xs:element name="eNCF" type="AlfaNum11Validation" minOccurs="1" maxOccurs="1"/>
+              <xs:element name="Estado" type="EstadoAcuseType" minOccurs="1" maxOccurs="1"/>
+              <xs:element name="CodigoMotivoNoRecibido" type="MotivoNoRecibidoType" minOccurs="0" maxOccurs="1"/>
+              <xs:element name="FechaHoraAcuseRecibo" type="DateAndTimeValidation" minOccurs="1" maxOccurs="1"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:any minOccurs="0" maxOccurs="1" processContents="skip" />
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <!-- Definiciones de Tipos de datos (reutilizados del ACECF oficial) -->
+  <xs:simpleType name="versionType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="1.0"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="EstadoAcuseType">
+    <xs:restriction base="xs:integer">
+      <xs:enumeration value="0"/> <!-- e-CF Recibido -->
+      <xs:enumeration value="1"/> <!-- e-CF No Recibido -->
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="MotivoNoRecibidoType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[1-4]?"/> <!-- 1..4, o vacío cuando Estado=0 -->
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="AlfaNum11Validation">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="([a-z0-9A-Z]{13,13})|([a-z0-9A-Z]{11,11})|([a-z0-9A-Z]{9,9})"></xs:pattern>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="RNCValidation">
+    <xs:restriction base="xs:integer">
+      <xs:pattern value="(\d{11,11})|(\d{9,9})"></xs:pattern>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="DateAndTimeValidation">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="(3[01]|[12][0-9]|0[1-9])-(1[0-2]|0[1-9])-[0-9]{4} (2[0-3]|[01]?[0-9]):([0-5]?[0-9]):([0-5]?[0-9])"></xs:pattern>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>

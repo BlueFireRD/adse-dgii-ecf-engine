@@ -1,0 +1,112 @@
+[
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E310000000002",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "4674.35",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E310000000003",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "154003.47",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E310000000004",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "18283.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E310000000009",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "41450.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E330000000001",
+    "FechaEmision": "02-04-2020",
+    "MontoTotal": "400000.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E340000000013",
+    "FechaEmision": "02-04-2020",
+    "MontoTotal": "917095.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E340000000018",
+    "FechaEmision": "02-12-2018",
+    "MontoTotal": "0.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E440000000011",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "10209.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E440000000013",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "917095.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E450000000001",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "35400.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  },
+  {
+    "Version": "1.0",
+    "RNCEmisor": "131880681",
+    "eNCF": "E450000000010",
+    "FechaEmision": "01-04-2020",
+    "MontoTotal": "936920.00",
+    "RNCComprador": "133470616",
+    "Estado": "1",
+    "FechaHoraAprobacionComercial": "23-06-2026 17:45:47"
+  }
+]

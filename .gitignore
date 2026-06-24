@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/
+*.p12
+*.pem
+.env
+consumo_xml/
+consumo_xml_paso4/

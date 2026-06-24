@@ -1,0 +1,9 @@
+node_modules
+dist
+out
+*.p12
+.env
+.git
+consumo_xml_paso4*
+*.zip
+uploaded_attachments
