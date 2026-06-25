@@ -1,4 +1,5 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
+import { timingSafeEqual } from 'crypto';
 import { buildEcf } from './xmlBuilder';
 import { buildRfce } from './rfceBuilder';
 import { buildAcecf, AcecfCase } from './acecfBuilder';
@@ -15,7 +16,38 @@ app.use(express.text({ type: ['application/xml', 'text/xml'], limit: '10mb' }));
 
 // RECEPTOR web services (fe/...). Multipart routes handle their own body
 // parsing (multer), so they coexist with the JSON/text parsers above.
+// These are called by the DGII (not the POS) and use their own seed/JWT auth,
+// so they MUST be mounted BEFORE the emisor API-key guard below.
 app.use(receptorRouter);
+
+/**
+ * API-key guard for the EMISOR endpoints (the ones the POS/CRM calls:
+ * /generate, /sign, /validate, /aprobacion, /submit, /submit-aprobacion).
+ *
+ * - /health and the receptor fe/... routes are intentionally NOT guarded.
+ * - If EMISOR_API_KEY is unset, the guard is disabled (local dev). In
+ *   production the env var is set, so a valid key is required.
+ * - Accepts the key via "x-api-key" header or "Authorization: Bearer <key>".
+ */
+const EMISOR_API_KEY = process.env.EMISOR_API_KEY || '';
+function emisorAuth(req: Request, res: Response, next: NextFunction) {
+  if (!EMISOR_API_KEY) return next(); // disabled in local dev
+  const header = String(req.headers['authorization'] || '');
+  const bearer = header.toLowerCase().startsWith('bearer ')
+    ? header.slice(7).trim()
+    : '';
+  const provided = String(req.headers['x-api-key'] || '') || bearer;
+  if (provided && timingSafeEqualStr(provided, EMISOR_API_KEY)) return next();
+  return res.status(401).json({ error: 'unauthorized: missing or invalid API key' });
+}
+
+/** Constant-time string comparison to avoid timing leaks on the key. */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
 
 /** Lazily resolve signing key material (real P12 or ephemeral fallback). */
 function getKey(): { key: KeyMaterial; ephemeral: boolean } {
@@ -29,7 +61,7 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 /** POST /generate { type, case } -> unsigned XML. */
-app.post('/generate', (req: Request, res: Response) => {
+app.post('/generate', emisorAuth, (req: Request, res: Response) => {
   try {
     const { type, case: rawCase } = req.body;
     if (!rawCase) return res.status(400).json({ error: 'missing "case"' });
@@ -43,7 +75,7 @@ app.post('/generate', (req: Request, res: Response) => {
 });
 
 /** POST /sign { xml } | { type, case } -> signed XML. */
-app.post('/sign', (req: Request, res: Response) => {
+app.post('/sign', emisorAuth, (req: Request, res: Response) => {
   try {
     let xml: string | undefined = typeof req.body === 'string' ? req.body : req.body.xml;
     if (!xml && req.body.case) {
@@ -60,7 +92,7 @@ app.post('/sign', (req: Request, res: Response) => {
 });
 
 /** POST /validate { xml, type } -> { valid, errors }. type "rfce" or e-CF type. */
-app.post('/validate', (req: Request, res: Response) => {
+app.post('/validate', emisorAuth, (req: Request, res: Response) => {
   try {
     const xml: string = typeof req.body === 'string' ? req.body : req.body.xml;
     const type = String((req.body && req.body.type) || '').toLowerCase();
@@ -89,7 +121,7 @@ function resolveAcecfCase(body: any): AcecfCase | { error: string } {
 }
 
 /** POST /aprobacion { ...AcecfCase | encf, validate? } -> signed ACECF XML. */
-app.post('/aprobacion', (req: Request, res: Response) => {
+app.post('/aprobacion', emisorAuth, (req: Request, res: Response) => {
   try {
     const resolved = resolveAcecfCase(req.body);
     if ('error' in resolved) return res.status(400).json({ error: resolved.error });
@@ -105,7 +137,7 @@ app.post('/aprobacion', (req: Request, res: Response) => {
 });
 
 /** POST /submit-aprobacion { ...AcecfCase | encf } -> DGII verdict (sync). */
-app.post('/submit-aprobacion', async (req: Request, res: Response) => {
+app.post('/submit-aprobacion', emisorAuth, async (req: Request, res: Response) => {
   try {
     const resolved = resolveAcecfCase(req.body);
     if ('error' in resolved) return res.status(400).json({ error: resolved.error });
@@ -124,7 +156,7 @@ app.post('/submit-aprobacion', async (req: Request, res: Response) => {
 });
 
 /** POST /submit { xml, kind } -> DGII response verbatim. */
-app.post('/submit', async (req: Request, res: Response) => {
+app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
   try {
     const { xml, kind, encf } = req.body;
     if (!xml || !kind) return res.status(400).json({ error: 'missing "xml" or "kind"' });
