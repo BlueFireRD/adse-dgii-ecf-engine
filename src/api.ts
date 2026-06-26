@@ -6,7 +6,7 @@ import { buildAcecf, AcecfCase } from './acecfBuilder';
 import { normalize, getAcecfCase } from './dataset';
 import { schemaPathForEcf, schemaPathForRfce, schemaPathForAcecf, validateXml } from './validator';
 import { keyFromEnv, generateEphemeralKey, signXml, KeyMaterial } from './signer';
-import { sendEcf, sendRfce, sendAprobacion } from './dgiiClient';
+import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } from './dgiiClient';
 import { RFCE_ENCFS } from './types';
 import { receptorRouter } from './receptor';
 
@@ -170,6 +170,49 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
       kind === 'rfce'
         ? await sendRfce(xml, encf || 'doc', key)
         : await sendEcf(xml, encf || 'doc', key);
+    res.status(result.status).type('application/json').send(result.body);
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /emitir-consumo { ...caseFields } -> DGII verdict (sync RFCE).
+ * Builds, signs, and submits an RFCE in one shot; returns the DGII response.
+ */
+app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { key, ephemeral } = getKey();
+    if (ephemeral) {
+      return res.status(412).json({
+        error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
+      });
+    }
+    const data = normalize(req.body);
+    const signed = signXml(buildRfce(data), key);
+    const result = await sendRfce(signed, data.ENCF || 'doc', key);
+    res.status(result.status).type('application/json').send(result.body);
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /consulta { trackId } -> DGII async verdict for an e-CF reception.
+ * Authenticates with the stored P12 and polls consultaResultado.
+ */
+app.post('/consulta', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { trackId } = req.body;
+    if (!trackId) return res.status(400).json({ error: 'missing "trackId"' });
+    const { key, ephemeral } = getKey();
+    if (ephemeral) {
+      return res.status(412).json({
+        error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
+      });
+    }
+    const token = await authenticate(key);
+    const result = await consultaResultado(String(trackId), token);
     res.status(result.status).type('application/json').send(result.body);
   } catch (e: any) {
     res.status(502).json({ error: e.message });
