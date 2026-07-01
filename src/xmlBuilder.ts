@@ -2,6 +2,7 @@ import * as path from 'path';
 import { parseXsd } from './xsd';
 import { CaseData } from './types';
 import { BuildContext, buildChildrenPublic } from './buildShared';
+import { sanitizeAndWarn } from './textSanitizer';
 
 const SCHEMA_DIR = path.resolve(__dirname, '..', 'schemas');
 
@@ -15,8 +16,11 @@ function nowDgiiTimestamp(): string {
 export function buildEcf(data: CaseData, type: string): string {
   const xsdFile = `e-CF-${type}-v.1.0.xsd`;
   const root = parseXsd(path.join(SCHEMA_DIR, xsdFile));
+  // Defensa de codificación: repara mojibake común y avisa sobre corrupción
+  // irreparable antes de construir y firmar el XML. No altera texto válido.
+  const cleanData = sanitizeAndWarn(data as any, `e-CF ${(data as any).ENCF || type}`) as CaseData;
   const ctx: BuildContext = {
-    data,
+    data: cleanData,
     synth: { FechaHoraFirma: nowDgiiTimestamp() },
   };
   const inner = buildChildrenPublic(root, [], [], ctx);
