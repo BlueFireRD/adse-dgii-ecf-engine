@@ -88,6 +88,7 @@ receptorRouter.get('/fe/autenticacion/api/semilla', (_req: Request, res: Respons
   const valor = randomUUID();
   const fecha = new Date().toISOString();
   rememberSeed(valor);
+  console.error(`[auth-diag] semilla emitida valor="${valor}" seedsEnStore=${issuedSeeds.size}`);
   const xml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<SemillaModel><valor>${valor}</valor><fecha>${fecha}</fecha></SemillaModel>`;
@@ -102,13 +103,20 @@ receptorRouter.post(
     const xml = xmlFromMultipart(req);
     if (!xml) return res.status(400).json({ error: 'missing "xml" form field' });
 
+    // --- DIAG TEMPORAL: inspeccionar la semilla firmada que envía la DGII ---
+    console.error('[auth-diag] === validacioncertificado recibido ===');
+    console.error(`[auth-diag] bytes=${xml.length}`);
+    console.error('[auth-diag] XML entrante:\n' + xml.slice(0, 4000));
+
     // (a) verify the XMLDSig signature against the certificate embedded in the doc.
     let signatureOk = false;
     try {
       signatureOk = verifyXml(xml);
-    } catch {
+    } catch (e: any) {
       signatureOk = false;
+      console.error(`[auth-diag] verifyXml LANZO EXCEPCION: ${e?.message || e}`);
     }
+    console.error(`[auth-diag] verifyXml resultado = ${signatureOk}`);
     if (!signatureOk) return res.status(401).json({ error: 'invalid seed signature' });
 
     // (b) the seed value must have been issued by us and not expired.
@@ -119,6 +127,8 @@ receptorRouter.post(
       return res.status(400).json({ error: 'malformed XML' });
     }
     const valor = tag(doc, 'valor');
+    const conocido = valor ? issuedSeeds.has(valor) : false;
+    console.error(`[auth-diag] valor="${valor}" conocido=${conocido} seedsEnStore=${issuedSeeds.size}`);
     if (!valor || !consumeSeed(valor)) {
       return res.status(401).json({ error: 'unknown or expired seed' });
     }
@@ -127,6 +137,7 @@ receptorRouter.post(
     const nowSec = Math.floor(Date.now() / 1000);
     const exp = nowSec + JWT_TTL_SECONDS;
     const token = jwt.sign({ rnc: ADSE_RNC, iat: nowSec, exp }, JWT_SECRET);
+    console.error('[auth-diag] -> 200 token emitido OK');
     res.json({ token, expira: new Date(exp * 1000).toISOString() });
   }
 );
