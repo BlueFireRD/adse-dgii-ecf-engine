@@ -187,8 +187,13 @@ export function verifyXml(signedXml: string): boolean {
       ? keyInfo.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'X509Certificate')
       : null;
     if (certs && certs.length) {
-      const b64 = certs[0].textContent.replace(/\s+/g, '');
-      return `-----BEGIN CERTIFICATE-----\n${b64.replace(/(.{64})/g, '$1\n')}\n-----END CERTIFICATE-----`;
+      const b64 = (certs[0].textContent || '').replace(/\s+/g, '');
+      // Wrap at 64 chars WITHOUT a trailing newline. The previous
+      // `b64.replace(/(.{64})/g, '$1\n')` left a blank line when the cert
+      // length was an exact multiple of 64 (e.g. DGII's 2048-char cert),
+      // which OpenSSL 3 rejects with "asn1 wrong tag".
+      const lines = b64.match(/.{1,64}/g) || [b64];
+      return `-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----`;
     }
     return null;
   };
