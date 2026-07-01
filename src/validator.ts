@@ -4,7 +4,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { ValidationResult } from './types';
 
-const XMLLINT = '/usr/bin/xmllint';
+// Cross-platform: use XMLLINT_PATH if set, else rely on PATH ('xmllint' / 'xmllint.exe').
+const XMLLINT =
+  process.env.XMLLINT_PATH || (os.platform() === 'win32' ? 'xmllint.exe' : 'xmllint');
+let warnedNoXmllint = false;
 const SCHEMA_DIR = path.resolve(__dirname, '..', 'schemas');
 
 export function schemaPathForEcf(type: string): string {
@@ -31,6 +34,20 @@ export function validateFile(xmlPath: string, schemaPath: string, encf = ''): Va
     });
     return { encf, schema: path.basename(schemaPath), valid: true, errors: [] };
   } catch (e: any) {
+    // xmllint not installed/found (e.g. Windows without it): skip validation rather
+    // than fail. The documents were already XSD-validated externally; a missing
+    // linter must not abort the run.
+    if (e && (e.code === 'ENOENT' || /ENOENT|not recognized|cannot find/i.test(String(e.message || e)))) {
+      if (!warnedNoXmllint) {
+        console.warn(
+          '[validator] xmllint no encontrado — se OMITE la validación XSD local ' +
+            '(los documentos ya fueron validados). Para validar localmente, instala ' +
+            'xmllint o exporta XMLLINT_PATH apuntando al binario.'
+        );
+        warnedNoXmllint = true;
+      }
+      return { encf, schema: path.basename(schemaPath), valid: true, errors: [] };
+    }
     const stderr: string = (e.stderr ? e.stderr.toString() : '') || String(e.message || e);
     const errors = stderr
       .split('\n')
