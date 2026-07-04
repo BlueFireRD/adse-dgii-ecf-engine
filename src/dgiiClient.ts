@@ -1,20 +1,68 @@
 import { KeyMaterial, signXml } from './signer';
 
+export interface DgiiEndpoints {
+  semilla: string;
+  validarSemilla: string;
+  recepcionEcf: string;
+  recepcionRfce: string;
+  consultaResultado: string;
+  aprobacionComercial: string;
+}
+
 /**
- * DGII CerteCF (certification) environment endpoints. Casing is significant:
- * the ecf. host uses lowercase "certecf"; the fc. host uses "Certecf".
+ * Certification environment (CerteCF). Casing is significant and
+ * DGII-confirmed: ecf. host uses lowercase "certecf"; fc. host uses "Certecf".
  */
-export const ENDPOINTS = {
+const CERTECF_ENDPOINTS: DgiiEndpoints = {
   semilla: 'https://ecf.dgii.gov.do/certecf/autenticacion/api/autenticacion/semilla',
   validarSemilla:
     'https://ecf.dgii.gov.do/certecf/autenticacion/api/autenticacion/validarsemilla',
   recepcionEcf: 'https://ecf.dgii.gov.do/certecf/recepcion/api/FacturasElectronicas',
   recepcionRfce: 'https://fc.dgii.gov.do/Certecf/recepcionfc/api/recepcion/ecf',
   consultaResultado: 'https://ecf.dgii.gov.do/certecf/consultaresultado/api/Consultas/Estado',
-  // Paso 3 — Aprobación Comercial. Casing ("CerteCF"/"AprobacionComercial") is
-  // significant per the DGII community Paso-3 thread. Synchronous JSON verdict.
-  aprobacionComercial: 'https://ecf.dgii.gov.do/CerteCF/AprobacionComercial/api/AprobacionComercial',
+  aprobacionComercial:
+    'https://ecf.dgii.gov.do/CerteCF/AprobacionComercial/api/AprobacionComercial',
 };
+
+/**
+ * Production environment (ecf). DGII-confirmed paths swap the "certecf"
+ * segment to lowercase "ecf". Two endpoints are marked below because DGII
+ * has not published their production casing explicitly.
+ */
+const PRODUCTION_ENDPOINTS: DgiiEndpoints = {
+  semilla: 'https://ecf.dgii.gov.do/ecf/autenticacion/api/autenticacion/semilla',
+  validarSemilla:
+    'https://ecf.dgii.gov.do/ecf/autenticacion/api/autenticacion/validarsemilla',
+  recepcionEcf: 'https://ecf.dgii.gov.do/ecf/recepcion/api/FacturasElectronicas',
+  recepcionRfce: 'https://fc.dgii.gov.do/ecf/recepcionfc/api/recepcion/ecf', // ⚠ verify casing
+  consultaResultado: 'https://ecf.dgii.gov.do/ecf/consultaresultado/api/Consultas/Estado',
+  aprobacionComercial:
+    'https://ecf.dgii.gov.do/ecf/AprobacionComercial/api/AprobacionComercial', // ⚠ verify casing
+};
+
+/** True when DGII_ENV is set to a production value ('ecf'|'prod'|'produccion'|'production'). */
+function isProduction(): boolean {
+  const env = (process.env.DGII_ENV || '').toLowerCase();
+  return env === 'ecf' || env === 'prod' || env === 'produccion' || env === 'production';
+}
+
+/**
+ * Active endpoint set, resolved once at startup from DGII_ENV.
+ * Individual URLs can be overridden via per-URL env vars (useful for
+ * routing a single endpoint through a proxy or test double without
+ * switching the whole environment).
+ */
+export const ENDPOINTS: DgiiEndpoints = (() => {
+  const base = isProduction() ? PRODUCTION_ENDPOINTS : CERTECF_ENDPOINTS;
+  return {
+    semilla:             process.env.DGII_URL_SEMILLA          || base.semilla,
+    validarSemilla:      process.env.DGII_URL_VALIDARSEMILLA   || base.validarSemilla,
+    recepcionEcf:        process.env.DGII_URL_RECEPCION_ECF    || base.recepcionEcf,
+    recepcionRfce:       process.env.DGII_URL_RECEPCION_RFCE   || base.recepcionRfce,
+    consultaResultado:   process.env.DGII_URL_CONSULTA         || base.consultaResultado,
+    aprobacionComercial: process.env.DGII_URL_APROBACION       || base.aprobacionComercial,
+  };
+})();
 
 /** POST an XML payload as multipart/form-data under the field name "xml". */
 async function postXmlMultipart(
