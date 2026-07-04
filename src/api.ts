@@ -5,7 +5,7 @@ import { buildRfce } from './rfceBuilder';
 import { buildAcecf, AcecfCase } from './acecfBuilder';
 import { normalize, getAcecfCase } from './dataset';
 import { schemaPathForEcf, schemaPathForRfce, schemaPathForAcecf, validateXml } from './validator';
-import { keyFromEnv, generateEphemeralKey, signXml, KeyMaterial } from './signer';
+import { keyFromEnv, generateEphemeralKey, signXml, extractSecurityCode, KeyMaterial } from './signer';
 import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } from './dgiiClient';
 import { RFCE_ENCFS } from './types';
 import { receptorRouter } from './receptor';
@@ -189,9 +189,22 @@ app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
       });
     }
     const data = normalize(req.body);
-    const signed = signXml(buildRfce(data), key);
+    // Two-step: sign the full e-CF 32 first to derive the real security code
+    // (first 6 chars of its SignatureValue), then embed it in the RFCE summary.
+    const signedFull = signXml(buildEcf(data, '32'), key);
+    const code = extractSecurityCode(signedFull);
+    const signed = signXml(buildRfce(data, code), key);
     const result = await sendRfce(signed, data.ENCF || 'doc', key);
-    res.status(result.status).type('application/json').send(result.body);
+    res.status(result.status).set('Content-Type', 'application/json').send(
+      (() => {
+        try {
+          const parsed = JSON.parse(result.body);
+          return JSON.stringify({ ...parsed, codigoSeguridad: code });
+        } catch {
+          return result.body;
+        }
+      })()
+    );
   } catch (e: any) {
     res.status(502).json({ error: e.message });
   }
