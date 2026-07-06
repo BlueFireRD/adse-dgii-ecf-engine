@@ -6,7 +6,7 @@ import { buildAcecf, AcecfCase } from './acecfBuilder';
 import { normalize, getAcecfCase } from './dataset';
 import { schemaPathForEcf, schemaPathForRfce, schemaPathForAcecf, validateXml } from './validator';
 import { generateEphemeralKey, signXml, extractSecurityCode, KeyMaterial } from './signer';
-import { keyForRnc } from './certStore';
+import { keyForRnc, upsertCert, reservarEncf, upsertSequence } from './certStore';
 import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } from './dgiiClient';
 import { runMigration } from './db';
 import { RFCE_ENCFS } from './types';
@@ -220,6 +220,66 @@ app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
     );
   } catch (e: any) {
     res.status(502).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /certs { rnc, p12Base64, password }
+ * Store or replace a tenant PKCS#12 cert (base64-encoded). Encrypted at rest.
+ */
+app.post('/certs', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { rnc, p12Base64, password } = req.body;
+    if (!rnc || !p12Base64 || !password) {
+      return res.status(400).json({ error: 'missing required fields: rnc, p12Base64, password' });
+    }
+    await upsertCert(String(rnc), String(p12Base64), String(password));
+    res.json({ ok: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /secuencias { rnc, ecfType, environment, desde, hasta, actual, vencimiento? }
+ * Load or refresh a tenant's eNCF sequence range.
+ */
+app.post('/secuencias', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { rnc, ecfType, environment, desde, hasta, actual, vencimiento } = req.body;
+    if (!rnc || !ecfType || desde == null || hasta == null || actual == null) {
+      return res.status(400).json({ error: 'missing required fields: rnc, ecfType, desde, hasta, actual' });
+    }
+    await upsertSequence({
+      rnc: String(rnc),
+      ecfType: String(ecfType),
+      environment: String(environment || 'certecf'),
+      desde: Number(desde),
+      hasta: Number(hasta),
+      actual: Number(actual),
+      vencimiento: vencimiento ? String(vencimiento) : undefined,
+    });
+    res.json({ ok: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /reservar-encf { rnc, ecfType, environment }
+ * Atomically reserve the next eNCF in the tenant's active sequence range.
+ * Returns { encf: "E31XXXXXXXXXX" }.
+ */
+app.post('/reservar-encf', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { rnc, ecfType, environment } = req.body;
+    if (!rnc || !ecfType) {
+      return res.status(400).json({ error: 'missing required fields: rnc, ecfType' });
+    }
+    const encf = await reservarEncf(String(rnc), String(ecfType), String(environment || 'certecf'));
+    res.json({ encf });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
