@@ -59,3 +59,61 @@ export async function upsertCert(rnc: string, p12Base64: string, password: strin
   );
   certCache.delete(rnc);
 }
+
+/**
+ * Atomically reserve the next eNCF in the tenant's active sequence range.
+ * Uses a single UPDATE ... RETURNING so two concurrent calls never get the
+ * same number. Returns the formatted eNCF ("E" + ecfType + 10-digit seq).
+ * Throws when no active range exists or the range is exhausted.
+ */
+export async function reservarEncf(rnc: string, ecfType: string, environment: string): Promise<string> {
+  const db = getPool();
+  const env = normalizeEnv(environment);
+  const { rows } = await db.query<{ actual: string }>(
+    `UPDATE tenant_sequences
+        SET actual = actual + 1
+      WHERE rnc = $1 AND ecf_type = $2 AND environment = $3
+        AND activo = TRUE AND actual < hasta
+      RETURNING actual`,
+    [rnc, ecfType, env]
+  );
+  if (rows.length === 0) {
+    throw new Error(`No active sequence for RNC=${rnc} type=${ecfType} env=${env}`);
+  }
+  const num = Number(rows[0].actual);
+  return `E${ecfType}${String(num).padStart(10, '0')}`;
+}
+
+/** Insert or update an eNCF sequence range for a tenant. */
+export async function upsertSequence(opts: {
+  rnc: string;
+  ecfType: string;
+  environment: string;
+  desde: number;
+  hasta: number;
+  actual: number;
+  vencimiento?: string;
+}): Promise<void> {
+  const db = getPool();
+  const env = normalizeEnv(opts.environment);
+  await db.query(
+    `INSERT INTO tenant_sequences
+       (rnc, ecf_type, environment, desde, hasta, actual, vencimiento, activo)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
+     ON CONFLICT (rnc, ecf_type, environment) DO UPDATE SET
+       desde       = EXCLUDED.desde,
+       hasta       = EXCLUDED.hasta,
+       actual      = EXCLUDED.actual,
+       vencimiento = EXCLUDED.vencimiento,
+       activo      = TRUE`,
+    [opts.rnc, opts.ecfType, env, opts.desde, opts.hasta, opts.actual, opts.vencimiento ?? null]
+  );
+}
+
+/** Normalize an environment string to the canonical DB value ('certecf' or 'ecf'). */
+export function normalizeEnv(env: string): string {
+  const e = (env || '').toLowerCase().trim();
+  return (e === 'ecf' || e === 'prod' || e === 'produccion' || e === 'production')
+    ? 'ecf'
+    : 'certecf';
+}
