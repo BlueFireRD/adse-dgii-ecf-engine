@@ -5,43 +5,38 @@ import { buildRfce } from './rfceBuilder';
 import { buildAcecf, AcecfCase } from './acecfBuilder';
 import { normalize, getAcecfCase } from './dataset';
 import { schemaPathForEcf, schemaPathForRfce, schemaPathForAcecf, validateXml } from './validator';
-import { keyFromEnv, generateEphemeralKey, signXml, extractSecurityCode, KeyMaterial } from './signer';
+import { generateEphemeralKey, signXml, extractSecurityCode, KeyMaterial } from './signer';
+import { keyForRnc } from './certStore';
 import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } from './dgiiClient';
+import { runMigration } from './db';
 import { RFCE_ENCFS } from './types';
 import { receptorRouter } from './receptor';
+
+const ADSE_RNC = '133470616';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.text({ type: ['application/xml', 'text/xml'], limit: '10mb' }));
 
-// RECEPTOR web services (fe/...). Multipart routes handle their own body
-// parsing (multer), so they coexist with the JSON/text parsers above.
-// These are called by the DGII (not the POS) and use their own seed/JWT auth,
-// so they MUST be mounted BEFORE the emisor API-key guard below.
+// RECEPTOR web services (fe/...). Mounted before the emisor API-key guard so
+// the DGII can call us without an emisor key.
 app.use(receptorRouter);
 
 /**
- * API-key guard for the EMISOR endpoints (the ones the POS/CRM calls:
- * /generate, /sign, /validate, /aprobacion, /submit, /submit-aprobacion).
- *
- * - /health and the receptor fe/... routes are intentionally NOT guarded.
- * - If EMISOR_API_KEY is unset, the guard is disabled (local dev). In
- *   production the env var is set, so a valid key is required.
- * - Accepts the key via "x-api-key" header or "Authorization: Bearer <key>".
+ * API-key guard for emisor endpoints (/generate, /sign, /validate, etc.).
+ * Disabled when EMISOR_API_KEY is unset (local dev). Accepts the key via
+ * "x-api-key" header or "Authorization: Bearer <key>".
  */
 const EMISOR_API_KEY = process.env.EMISOR_API_KEY || '';
 function emisorAuth(req: Request, res: Response, next: NextFunction) {
-  if (!EMISOR_API_KEY) return next(); // disabled in local dev
+  if (!EMISOR_API_KEY) return next();
   const header = String(req.headers['authorization'] || '');
-  const bearer = header.toLowerCase().startsWith('bearer ')
-    ? header.slice(7).trim()
-    : '';
+  const bearer = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
   const provided = String(req.headers['x-api-key'] || '') || bearer;
   if (provided && timingSafeEqualStr(provided, EMISOR_API_KEY)) return next();
   return res.status(401).json({ error: 'unauthorized: missing or invalid API key' });
 }
 
-/** Constant-time string comparison to avoid timing leaks on the key. */
 function timingSafeEqualStr(a: string, b: string): boolean {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -49,10 +44,30 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-/** Lazily resolve signing key material (real P12 or ephemeral fallback). */
-function getKey(): { key: KeyMaterial; ephemeral: boolean } {
-  const envKey = keyFromEnv();
-  if (envKey) return { key: envKey, ephemeral: false };
+/** Extract RNCEmisor from a JSON request body (case object or top-level field). */
+function rncFromBody(body: any): string {
+  if (typeof body === 'string') {
+    const m = body.match(/<RNCEmisor>\s*([0-9]+)\s*<\/RNCEmisor>/);
+    return m ? m[1] : ADSE_RNC;
+  }
+  if (body?.case?.RNCEmisor) return String(body.case.RNCEmisor);
+  if (body?.RNCEmisor) return String(body.RNCEmisor);
+  return ADSE_RNC;
+}
+
+/** Extract RNCEmisor from a signed or unsigned XML string. */
+function rncFromXml(xml: string): string {
+  const m = xml.match(/<RNCEmisor>\s*([0-9]+)\s*<\/RNCEmisor>/);
+  return m ? m[1] : ADSE_RNC;
+}
+
+/**
+ * Resolve signing key for an RNC.
+ * Uses the DB cert if available; falls back to env cert; last resort is ephemeral.
+ */
+async function resolveKey(rnc: string): Promise<{ key: KeyMaterial; ephemeral: boolean }> {
+  const key = await keyForRnc(rnc);
+  if (key) return { key, ephemeral: false };
   return { key: generateEphemeralKey(), ephemeral: true };
 }
 
@@ -74,8 +89,8 @@ app.post('/generate', emisorAuth, (req: Request, res: Response) => {
   }
 });
 
-/** POST /sign { xml } | { type, case } -> signed XML. */
-app.post('/sign', emisorAuth, (req: Request, res: Response) => {
+/** POST /sign { xml } | { type, case } -> signed XML. Selects cert by RNCEmisor. */
+app.post('/sign', emisorAuth, async (req: Request, res: Response) => {
   try {
     let xml: string | undefined = typeof req.body === 'string' ? req.body : req.body.xml;
     if (!xml && req.body.case) {
@@ -84,14 +99,15 @@ app.post('/sign', emisorAuth, (req: Request, res: Response) => {
       xml = isRfce(data, t) ? buildRfce(data) : buildEcf(data, t);
     }
     if (!xml) return res.status(400).json({ error: 'missing "xml" or "case"' });
-    const { key } = getKey();
+    const rnc = rncFromBody(req.body);
+    const { key } = await resolveKey(rnc);
     res.type('application/xml').send(signXml(xml, key));
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/** POST /validate { xml, type } -> { valid, errors }. type "rfce" or e-CF type. */
+/** POST /validate { xml, type } -> { valid, errors }. */
 app.post('/validate', emisorAuth, (req: Request, res: Response) => {
   try {
     const xml: string = typeof req.body === 'string' ? req.body : req.body.xml;
@@ -105,10 +121,6 @@ app.post('/validate', emisorAuth, (req: Request, res: Response) => {
   }
 });
 
-/**
- * Resolve an AcecfCase from a request body: either a full case object, or
- * { encf } to derive the smoke-test candidate from the e-CF dataset.
- */
 function resolveAcecfCase(body: any): AcecfCase | { error: string } {
   if (body && body.eNCF && body.RNCEmisor) return body as AcecfCase;
   const encf = body && (body.encf || body.eNCF);
@@ -121,11 +133,12 @@ function resolveAcecfCase(body: any): AcecfCase | { error: string } {
 }
 
 /** POST /aprobacion { ...AcecfCase | encf, validate? } -> signed ACECF XML. */
-app.post('/aprobacion', emisorAuth, (req: Request, res: Response) => {
+app.post('/aprobacion', emisorAuth, async (req: Request, res: Response) => {
   try {
     const resolved = resolveAcecfCase(req.body);
     if ('error' in resolved) return res.status(400).json({ error: resolved.error });
-    const signed = signXml(buildAcecf(resolved), getKey().key);
+    const { key } = await resolveKey(resolved.RNCEmisor || ADSE_RNC);
+    const signed = signXml(buildAcecf(resolved), key);
     if (req.body && req.body.validate) {
       const result = validateXml(signed, schemaPathForAcecf(), resolved.eNCF);
       if (!result.valid) return res.status(422).json(result);
@@ -136,12 +149,12 @@ app.post('/aprobacion', emisorAuth, (req: Request, res: Response) => {
   }
 });
 
-/** POST /submit-aprobacion { ...AcecfCase | encf } -> DGII verdict (sync). */
+/** POST /submit-aprobacion { ...AcecfCase | encf } -> DGII verdict. */
 app.post('/submit-aprobacion', emisorAuth, async (req: Request, res: Response) => {
   try {
     const resolved = resolveAcecfCase(req.body);
     if ('error' in resolved) return res.status(400).json({ error: resolved.error });
-    const { key, ephemeral } = getKey();
+    const { key, ephemeral } = await resolveKey(resolved.RNCEmisor || ADSE_RNC);
     if (ephemeral) {
       return res.status(412).json({
         error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
@@ -155,21 +168,21 @@ app.post('/submit-aprobacion', emisorAuth, async (req: Request, res: Response) =
   }
 });
 
-/** POST /submit { xml, kind } -> DGII response verbatim. */
+/** POST /submit { xml, kind, encf } -> DGII response verbatim. */
 app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
   try {
     const { xml, kind, encf } = req.body;
     if (!xml || !kind) return res.status(400).json({ error: 'missing "xml" or "kind"' });
-    const { key, ephemeral } = getKey();
+    const rnc = rncFromXml(xml);
+    const { key, ephemeral } = await resolveKey(rnc);
     if (ephemeral) {
       return res.status(412).json({
         error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
       });
     }
-    const result =
-      kind === 'rfce'
-        ? await sendRfce(xml, encf || 'doc', key)
-        : await sendEcf(xml, encf || 'doc', key);
+    const result = kind === 'rfce'
+      ? await sendRfce(xml, encf || 'doc', key)
+      : await sendEcf(xml, encf || 'doc', key);
     res.status(result.status).type('application/json').send(result.body);
   } catch (e: any) {
     res.status(502).json({ error: e.message });
@@ -178,19 +191,19 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
 
 /**
  * POST /emitir-consumo { ...caseFields } -> DGII verdict (sync RFCE).
- * Builds, signs, and submits an RFCE in one shot; returns the DGII response.
+ * Two-step: sign the full e-CF 32 to derive codigoSeguridad, embed it in
+ * the RFCE summary, then sign and submit the RFCE.
  */
 app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
   try {
-    const { key, ephemeral } = getKey();
+    const data = normalize(req.body);
+    const rnc = data.RNCEmisor || ADSE_RNC;
+    const { key, ephemeral } = await resolveKey(rnc);
     if (ephemeral) {
       return res.status(412).json({
         error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
       });
     }
-    const data = normalize(req.body);
-    // Two-step: sign the full e-CF 32 first to derive the real security code
-    // (first 6 chars of its SignatureValue), then embed it in the RFCE summary.
     const signedFull = signXml(buildEcf(data, '32'), key);
     const code = extractSecurityCode(signedFull);
     const signed = signXml(buildRfce(data, code), key);
@@ -210,15 +223,12 @@ app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /consulta { trackId } -> DGII async verdict for an e-CF reception.
- * Authenticates with the stored P12 and polls consultaResultado.
- */
+/** POST /consulta { trackId, rnc? } -> DGII async verdict for a trackId. */
 app.post('/consulta', emisorAuth, async (req: Request, res: Response) => {
   try {
-    const { trackId } = req.body;
+    const { trackId, rnc } = req.body;
     if (!trackId) return res.status(400).json({ error: 'missing "trackId"' });
-    const { key, ephemeral } = getKey();
+    const { key, ephemeral } = await resolveKey(rnc || ADSE_RNC);
     if (ephemeral) {
       return res.status(412).json({
         error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
@@ -238,9 +248,18 @@ function isRfce(data: Record<string, string>, type: string): boolean {
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`DGII e-CF engine listening on :${PORT} (env=${process.env.DGII_ENV || 'certecf'})`);
-  });
+  runMigration()
+    .then(() =>
+      app.listen(PORT, () => {
+        console.log(`DGII e-CF engine listening on :${PORT} (env=${process.env.DGII_ENV || 'certecf'})`);
+      })
+    )
+    .catch((e) => {
+      console.error('[db] migration failed:', (e as Error).message);
+      app.listen(PORT, () => {
+        console.log(`DGII e-CF engine listening on :${PORT} (DB unavailable)`);
+      });
+    });
 }
 
 export { app };
