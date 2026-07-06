@@ -40,20 +40,20 @@ const PRODUCTION_ENDPOINTS: DgiiEndpoints = {
     'https://ecf.dgii.gov.do/ecf/AprobacionComercial/api/AprobacionComercial', // ⚠ verify casing
 };
 
-/** True when DGII_ENV is set to a production value ('ecf'|'prod'|'produccion'|'production'). */
-function isProduction(): boolean {
-  const env = (process.env.DGII_ENV || '').toLowerCase();
+/** True when an environment string resolves to production. */
+function isProduction(override?: string): boolean {
+  const env = (override || process.env.DGII_ENV || '').toLowerCase();
   return env === 'ecf' || env === 'prod' || env === 'produccion' || env === 'production';
 }
 
 /**
- * Active endpoint set, resolved once at startup from DGII_ENV.
- * Individual URLs can be overridden via per-URL env vars (useful for
- * routing a single endpoint through a proxy or test double without
- * switching the whole environment).
+ * Resolve the endpoint set for a given environment string.
+ * When `environment` is omitted the global DGII_ENV env var is used.
+ * Per-URL env vars are applied last so individual URLs can still be
+ * proxied or overridden without switching the whole environment.
  */
-export const ENDPOINTS: DgiiEndpoints = (() => {
-  const base = isProduction() ? PRODUCTION_ENDPOINTS : CERTECF_ENDPOINTS;
+export function endpointsFor(environment?: string): DgiiEndpoints {
+  const base = isProduction(environment) ? PRODUCTION_ENDPOINTS : CERTECF_ENDPOINTS;
   return {
     semilla:             process.env.DGII_URL_SEMILLA          || base.semilla,
     validarSemilla:      process.env.DGII_URL_VALIDARSEMILLA   || base.validarSemilla,
@@ -62,7 +62,13 @@ export const ENDPOINTS: DgiiEndpoints = (() => {
     consultaResultado:   process.env.DGII_URL_CONSULTA         || base.consultaResultado,
     aprobacionComercial: process.env.DGII_URL_APROBACION       || base.aprobacionComercial,
   };
-})();
+}
+
+/**
+ * Active endpoint set resolved once at startup from DGII_ENV.
+ * Kept for backward compatibility; prefer endpointsFor() for per-request use.
+ */
+export const ENDPOINTS: DgiiEndpoints = endpointsFor();
 
 /** POST an XML payload as multipart/form-data under the field name "xml". */
 async function postXmlMultipart(
@@ -85,10 +91,11 @@ async function postXmlMultipart(
 
 /**
  * Full auth flow: fetch the seed, sign it, post it to validarsemilla, and
- * return the bearer token.
+ * return the bearer token. Pass `environment` to target certecf vs. production.
  */
-export async function authenticate(key: KeyMaterial): Promise<string> {
-  const seedRes = await fetch(ENDPOINTS.semilla, { method: 'GET' });
+export async function authenticate(key: KeyMaterial, environment?: string): Promise<string> {
+  const ep = endpointsFor(environment);
+  const seedRes = await fetch(ep.semilla, { method: 'GET' });
   if (!seedRes.ok) {
     throw new Error(`semilla request failed: HTTP ${seedRes.status}`);
   }
@@ -96,7 +103,7 @@ export async function authenticate(key: KeyMaterial): Promise<string> {
   const signedSeed = signXml(seedXml, key);
 
   const { status, body } = await postXmlMultipart(
-    ENDPOINTS.validarSemilla,
+    ep.validarSemilla,
     signedSeed,
     'seed_signed.xml'
   );
@@ -121,15 +128,17 @@ function dgiiFilename(signedXml: string, encf: string): string {
 }
 
 /** Submit a signed e-CF document to the ecf host. */
-export async function sendEcf(signedXml: string, encf: string, key: KeyMaterial) {
-  const token = await authenticate(key);
-  return postXmlMultipart(ENDPOINTS.recepcionEcf, signedXml, dgiiFilename(signedXml, encf), token);
+export async function sendEcf(signedXml: string, encf: string, key: KeyMaterial, environment?: string) {
+  const ep = endpointsFor(environment);
+  const token = await authenticate(key, environment);
+  return postXmlMultipart(ep.recepcionEcf, signedXml, dgiiFilename(signedXml, encf), token);
 }
 
 /** Submit a signed RFCE summary to the fc host. */
-export async function sendRfce(signedXml: string, encf: string, key: KeyMaterial) {
-  const token = await authenticate(key);
-  return postXmlMultipart(ENDPOINTS.recepcionRfce, signedXml, dgiiFilename(signedXml, encf), token);
+export async function sendRfce(signedXml: string, encf: string, key: KeyMaterial, environment?: string) {
+  const ep = endpointsFor(environment);
+  const token = await authenticate(key, environment);
+  return postXmlMultipart(ep.recepcionRfce, signedXml, dgiiFilename(signedXml, encf), token);
 }
 
 /**
@@ -137,14 +146,10 @@ export async function sendRfce(signedXml: string, encf: string, key: KeyMaterial
  * Like RFCE this is SYNCHRONOUS: the response carries the verdict JSON
  * ({codigo, estado, mensajes, encf}) directly — no trackId polling.
  */
-export async function sendAprobacion(signedXml: string, encf: string, key: KeyMaterial) {
-  const token = await authenticate(key);
-  return postXmlMultipart(
-    ENDPOINTS.aprobacionComercial,
-    signedXml,
-    dgiiFilename(signedXml, encf),
-    token
-  );
+export async function sendAprobacion(signedXml: string, encf: string, key: KeyMaterial, environment?: string) {
+  const ep = endpointsFor(environment);
+  const token = await authenticate(key, environment);
+  return postXmlMultipart(ep.aprobacionComercial, signedXml, dgiiFilename(signedXml, encf), token);
 }
 
 /**
@@ -152,8 +157,9 @@ export async function sendAprobacion(signedXml: string, encf: string, key: KeyMa
  * asynchronous: FacturasElectronicas returns a trackId, and the final
  * Aceptado/Rechazado verdict is fetched here.
  */
-export async function consultaResultado(trackId: string, token: string) {
-  const url = `${ENDPOINTS.consultaResultado}?trackId=${encodeURIComponent(trackId)}`;
+export async function consultaResultado(trackId: string, token: string, environment?: string) {
+  const ep = endpointsFor(environment);
+  const url = `${ep.consultaResultado}?trackId=${encodeURIComponent(trackId)}`;
   const res = await fetch(url, { headers: { Authorization: `bearer ${token}` } });
   return { status: res.status, body: await res.text() };
 }
