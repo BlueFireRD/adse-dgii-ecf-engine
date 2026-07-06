@@ -1,0 +1,90 @@
+import { Pool } from 'pg';
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+
+const ALGO = 'aes-256-gcm';
+
+let _pool: Pool | null = null;
+
+/** Get (or lazily create) the shared connection pool. Throws if DATABASE_URL is absent. */
+export function getPool(): Pool {
+  if (!_pool) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL is not configured');
+    }
+    const ssl = process.env.PGSSLMODE === 'disable'
+      ? undefined
+      : { rejectUnauthorized: false };
+    _pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl });
+  }
+  return _pool;
+}
+
+function getStoreKey(): Buffer {
+  const hex = process.env.CERT_STORE_KEY;
+  if (!hex) throw new Error('CERT_STORE_KEY is required for tenant cert storage');
+  const buf = Buffer.from(hex, 'hex');
+  if (buf.length !== 32) throw new Error('CERT_STORE_KEY must be 32 bytes (64 hex chars)');
+  return buf;
+}
+
+/**
+ * Encrypt plaintext with AES-256-GCM.
+ * Wire format: base64( iv[12] || authTag[16] || ciphertext )
+ */
+export function encrypt(plaintext: string): string {
+  const key = getStoreKey();
+  const iv  = randomBytes(12);
+  const cipher = createCipheriv(ALGO, key, iv);
+  const ct  = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, ct]).toString('base64');
+}
+
+/** Decrypt a value produced by encrypt(). */
+export function decrypt(encoded: string): string {
+  const key = getStoreKey();
+  const buf = Buffer.from(encoded, 'base64');
+  const iv  = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const ct  = buf.subarray(28);
+  const decipher = createDecipheriv(ALGO, key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+}
+
+/**
+ * Idempotent schema migration — creates both tables if they do not exist.
+ * Silently no-ops when DATABASE_URL is absent (env-cert-only mode).
+ * Call once at server startup.
+ */
+export async function runMigration(): Promise<void> {
+  let db: Pool;
+  try {
+    db = getPool();
+  } catch {
+    return; // DATABASE_URL not set — skip
+  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tenant_certs (
+      rnc             TEXT PRIMARY KEY,
+      p12_base64_enc  TEXT NOT NULL,
+      password_enc    TEXT NOT NULL,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tenant_sequences (
+      rnc         TEXT    NOT NULL,
+      ecf_type    TEXT    NOT NULL,
+      environment TEXT    NOT NULL DEFAULT 'certecf',
+      desde       BIGINT  NOT NULL,
+      hasta       BIGINT  NOT NULL,
+      actual      BIGINT  NOT NULL,
+      vencimiento DATE,
+      activo      BOOLEAN NOT NULL DEFAULT TRUE,
+      PRIMARY KEY (rnc, ecf_type, environment)
+    )
+  `);
+  console.log('[db] schema OK');
+}
