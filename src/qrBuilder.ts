@@ -47,3 +47,60 @@ export function extractFechaFirma(xml: string): string {
   const m = xml.match(/<FechaHoraFirma>([^<]*)<\/FechaHoraFirma>/);
   return m ? m[1].trim() : '';
 }
+
+/** Extract the text content of a single XML element by tag name. Returns '' if absent. */
+export function xmlTag(xml: string, name: string): string {
+  const m = xml.match(new RegExp('<' + name + '>([^<]*)</' + name + '>'));
+  return m ? m[1] : '';
+}
+
+const QR_AMB = (environment?: string): string => {
+  const e = (environment || process.env.DGII_ENV || '').toLowerCase();
+  return (e === 'ecf' || e === 'prod' || e === 'produccion' || e === 'production') ? 'ecf' : 'certecf';
+};
+
+/**
+ * Build the ConsultaTimbre QR URL for a standard e-CF (tipos 31, 33, 34, 41, 43, 44, 45, 46, 47).
+ * RncComprador is omitted for tipo-43 (consumo factura) — pass undefined to skip it.
+ */
+export function buildEcfQrUrl(opts: {
+  environment?: string;
+  rncEmisor: string;
+  rncComprador?: string;
+  encf: string;
+  fechaEmision: string;
+  montoTotal: string;
+  fechaFirma: string;
+  codigoSeguridad: string;
+}): string {
+  const amb = QR_AMB(opts.environment);
+  const p = new URLSearchParams();
+  p.set('RncEmisor', opts.rncEmisor);
+  if (opts.rncComprador) p.set('RncComprador', opts.rncComprador);
+  p.set('ENCF', opts.encf);
+  p.set('FechaEmision', opts.fechaEmision);
+  p.set('MontoTotal', opts.montoTotal);
+  p.set('FechaFirma', opts.fechaFirma);
+  p.set('CodigoSeguridad', opts.codigoSeguridad);
+  return `https://ecf.dgii.gov.do/${amb}/ConsultaTimbre?` + p.toString().replace(/\+/g, '%20');
+}
+
+/**
+ * Build the ConsultaTimbreFC QR URL for consumo <250k (tipo-32 RFCE).
+ * This endpoint lives on fc.dgii.gov.do and does not include FechaFirma or RncComprador.
+ */
+export function buildFcQrUrl(opts: {
+  environment?: string;
+  rncEmisor: string;
+  encf: string;
+  montoTotal: string;
+  codigoSeguridad: string;
+}): string {
+  const amb = QR_AMB(opts.environment);
+  const p = new URLSearchParams();
+  p.set('RncEmisor', opts.rncEmisor);
+  p.set('ENCF', opts.encf);
+  p.set('MontoTotal', opts.montoTotal);
+  p.set('CodigoSeguridad', opts.codigoSeguridad);
+  return `https://fc.dgii.gov.do/${amb}/ConsultaTimbreFC?` + p.toString();
+}

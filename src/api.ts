@@ -12,6 +12,7 @@ import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } fr
 import { runMigration } from './db';
 import { RFCE_ENCFS } from './types';
 import { receptorRouter } from './receptor';
+import { extractFechaFirma, buildEcfQrUrl, buildFcQrUrl, xmlTag } from './qrBuilder';
 
 const ADSE_RNC = '133470616';
 
@@ -185,7 +186,21 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
     const result = kind === 'rfce'
       ? await sendRfce(xml, encf || 'doc', key, env)
       : await sendEcf(xml, encf || 'doc', key, env);
-    res.status(result.status).type('application/json').send(result.body);
+    const code = extractSecurityCode(xml);
+    const fechaFirma = extractFechaFirma(xml);
+    const qr = kind === 'rfce'
+      ? buildFcQrUrl({ environment: env, rncEmisor: rncFromXml(xml), encf: encf || xmlTag(xml, 'eNCF'), montoTotal: xmlTag(xml, 'MontoTotal'), codigoSeguridad: code })
+      : buildEcfQrUrl({ environment: env, rncEmisor: rncFromXml(xml), rncComprador: xmlTag(xml, 'RNCComprador') || undefined, encf: encf || xmlTag(xml, 'eNCF'), fechaEmision: xmlTag(xml, 'FechaEmision'), montoTotal: xmlTag(xml, 'MontoTotal'), fechaFirma, codigoSeguridad: code });
+    res.status(result.status).set('Content-Type', 'application/json').send(
+      (() => {
+        try {
+          const parsed = JSON.parse(result.body);
+          return JSON.stringify({ ...parsed, codigoSeguridad: code, fechaFirma, qr });
+        } catch {
+          return result.body;
+        }
+      })()
+    );
   } catch (e: any) {
     res.status(502).json({ error: e.message });
   }
@@ -209,13 +224,21 @@ app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
     }
     const signedFull = signXml(buildEcf(data, '32'), key);
     const code = extractSecurityCode(signedFull);
+    const fechaFirma = extractFechaFirma(signedFull);
     const signed = signXml(buildRfce(data, code), key);
     const result = await sendRfce(signed, data.ENCF || 'doc', key, env);
+    const qr = buildFcQrUrl({
+      environment: env,
+      rncEmisor: rnc,
+      encf: data.ENCF || '',
+      montoTotal: xmlTag(signedFull, 'MontoTotal') || String((data as any).MontoTotal ?? ''),
+      codigoSeguridad: code,
+    });
     res.status(result.status).set('Content-Type', 'application/json').send(
       (() => {
         try {
           const parsed = JSON.parse(result.body);
-          return JSON.stringify({ ...parsed, codigoSeguridad: code });
+          return JSON.stringify({ ...parsed, codigoSeguridad: code, fechaFirma, qr });
         } catch {
           return result.body;
         }
