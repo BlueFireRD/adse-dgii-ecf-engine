@@ -5,7 +5,8 @@ import { buildRfce } from './rfceBuilder';
 import { buildAcecf, AcecfCase } from './acecfBuilder';
 import { normalize, getAcecfCase } from './dataset';
 import { schemaPathForEcf, schemaPathForRfce, schemaPathForAcecf, validateXml } from './validator';
-import { generateEphemeralKey, signXml, extractSecurityCode, KeyMaterial } from './signer';
+import { generateEphemeralKey, signXml, extractSecurityCode, loadP12FromDerBinary, KeyMaterial } from './signer';
+import * as forge from 'node-forge';
 import { keyForRnc, upsertCert, reservarEncf, upsertSequence } from './certStore';
 import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } from './dgiiClient';
 import { runMigration } from './db';
@@ -227,7 +228,8 @@ app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
 
 /**
  * POST /certs { rnc, p12Base64, password }
- * Store or replace a tenant PKCS#12 cert (base64-encoded). Encrypted at rest.
+ * Validate the P12 decrypts and is not expired BEFORE storing it.
+ * Returns { ok, subject, notAfter } on success.
  */
 app.post('/certs', emisorAuth, async (req: Request, res: Response) => {
   try {
@@ -235,8 +237,24 @@ app.post('/certs', emisorAuth, async (req: Request, res: Response) => {
     if (!rnc || !p12Base64 || !password) {
       return res.status(400).json({ error: 'missing required fields: rnc, p12Base64, password' });
     }
+    // Validate the P12 opens with this password BEFORE storing anything.
+    let subject = '';
+    let notAfter: Date | null = null;
+    try {
+      const der = Buffer.from(String(p12Base64), 'base64').toString('binary');
+      const km = loadP12FromDerBinary(der, String(password));
+      const cert = forge.pki.certificateFromPem(km.certPem);
+      const cn = cert.subject.getField('CN');
+      subject = (cn && cn.value) || cert.subject.attributes.map((a: any) => a.value).filter(Boolean).join(', ');
+      notAfter = cert.validity.notAfter;
+    } catch (_ve) {
+      return res.status(422).json({ error: 'invalid_p12_or_password' });
+    }
+    if (notAfter && notAfter.getTime() <= Date.now()) {
+      return res.status(422).json({ error: 'certificate_expired', subject, notAfter: notAfter.toISOString() });
+    }
     await upsertCert(String(rnc), String(p12Base64), String(password));
-    res.json({ ok: true });
+    res.json({ ok: true, subject, notAfter: notAfter ? notAfter.toISOString() : null });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
