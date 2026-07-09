@@ -231,7 +231,8 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
  */
 app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
   try {
-    const env = requireEnvironment(req.body.environment);
+    const { environment } = req.body;
+    const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
     const data = normalize(req.body);
     const rnc = data.RNCEmisor || ADSE_RNC;
