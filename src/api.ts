@@ -12,6 +12,7 @@ import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } fr
 import { runMigration } from './db';
 import { RFCE_ENCFS } from './types';
 import { receptorRouter } from './receptor';
+import { padronRouter, schedulePadronCron } from './padronRouter';
 import { extractFechaFirma, buildEcfQrUrl, buildFcQrUrl, xmlTag } from './qrBuilder';
 
 const ADSE_RNC = '133470616';
@@ -23,6 +24,7 @@ app.use(express.text({ type: ['application/xml', 'text/xml'], limit: '10mb' }));
 // RECEPTOR web services (fe/...). Mounted before the emisor API-key guard so
 // the DGII can call us without an emisor key.
 app.use(receptorRouter);
+app.use(padronRouter);
 
 /**
  * API-key guard for emisor endpoints (/generate, /sign, /validate, etc.).
@@ -378,13 +380,15 @@ function isRfce(data: Record<string, string>, type: string): boolean {
 const PORT = parseInt(process.env.PORT || '3000', 10);
 if (require.main === module) {
   runMigration()
-    .then(() =>
+    .then(() => {
+      schedulePadronCron();
       app.listen(PORT, () => {
         console.log(`DGII e-CF engine listening on :${PORT} (env=${process.env.DGII_ENV || 'certecf'})`);
-      })
-    )
+      });
+    })
     .catch((e) => {
       console.error('[db] migration failed:', (e as Error).message);
+      schedulePadronCron();
       app.listen(PORT, () => {
         console.log(`DGII e-CF engine listening on :${PORT} (DB unavailable)`);
       });
