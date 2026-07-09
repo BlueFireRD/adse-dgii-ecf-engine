@@ -232,7 +232,16 @@ function posMapRow(parts: string[]): Record<string, unknown> {
   };
 }
 
-// TODO(Phase B): add crmMapRow when CRM_INGEST_URL is configured and the CRM row shape is confirmed.
+function crmMapRow(parts: string[]): Record<string, unknown> {
+  return {
+    rnc:              parts[0],
+    razon_social:     parts[1],
+    nombre_comercial: parts[2] || null,
+    actividad:        parts[3] || null,
+    estado:           parts[9] || null,
+    regimen:          parts[10] || null,
+  };
+}
 
 /** Returns all enabled targets based on configured env vars. */
 export function buildTargets(): PadronTarget[] {
@@ -246,8 +255,13 @@ export function buildTargets(): PadronTarget[] {
     });
   }
 
-  // TODO(Phase B): CRM target — enable when CRM_INGEST_URL is set and row shape is confirmed.
-  // if (process.env.CRM_INGEST_URL) { ... }
+  if (process.env.CRM_INGEST_URL) {
+    targets.push({
+      name:      'crm',
+      ingestUrl: process.env.CRM_INGEST_URL,
+      mapRow:    crmMapRow,
+    });
+  }
 
   return targets;
 }
