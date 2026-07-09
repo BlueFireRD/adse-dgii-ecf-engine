@@ -343,7 +343,7 @@ app.post('/reservar-encf', emisorAuth, async (req: Request, res: Response) => {
     }
     const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
-    const encf = await reservarEncf(String(rnc), String(ecfType), env);
+    const encf = await reservarEncf(String(rnc), String(ecfType), env.toLowerCase());
     res.json({ encf });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
