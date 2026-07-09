@@ -1,13 +1,10 @@
-import { Pool } from 'pg';
 import { unzipSync } from 'fflate';
 import * as iconv from 'iconv-lite';
 
 export interface PadronTarget {
   name: 'pos' | 'crm';
-  dbUrl: string;
-  padronTable: string;
-  runsTable: string;
-  mapRow: (parts: string[], syncedAt: string) => Record<string, unknown>;
+  ingestUrl: string;
+  mapRow: (parts: string[]) => Record<string, unknown>;
 }
 
 const DGII_ZIP_URL = 'https://www.dgii.gov.do/app/WebApps/Consultas/RNC/DGII_RNC.zip';
@@ -15,22 +12,7 @@ const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB
-const BATCH_SIZE = 5_000;
-const SWEEP_THRESHOLD = 500_000;
-
-// Per-target connection pools, live for the process lifetime.
-const pools = new Map<string, Pool>();
-
-export function getTargetPool(dbUrl: string): Pool {
-  if (!pools.has(dbUrl)) {
-    pools.set(dbUrl, new Pool({
-      connectionString: dbUrl,
-      ssl: { rejectUnauthorized: false },
-      max: 5,
-    }));
-  }
-  return pools.get(dbUrl)!;
-}
+export const BATCH_SIZE = 5_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
@@ -120,163 +102,152 @@ export function parseRows(text: string): string[][] {
   return result;
 }
 
-/**
- * Cheap pre-flight: verify the runs table and the padron table's synced_at
- * column exist in the target DB. Returns an error string, or null if OK.
- */
-export async function verifyTargetSchema(
-  pool: Pool,
-  target: PadronTarget
-): Promise<string | null> {
-  const { rows: r1 } = await pool.query(
-    `SELECT to_regclass($1) AS t`,
-    [`public.${target.runsTable}`]
-  );
-  if (!r1[0].t) return `runs table "${target.runsTable}" not found`;
+// ---------------------------------------------------------------------------
+// Ingest HTTP protocol
+// ---------------------------------------------------------------------------
 
-  const { rows: r2 } = await pool.query(
-    `SELECT 1 FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'synced_at'`,
-    [target.padronTable]
-  );
-  if (!r2.length) return `column synced_at not found in "${target.padronTable}"`;
+function ingestHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'x-padron-key': process.env.PADRON_API_KEY || '',
+  };
+}
 
-  return null;
+export interface BeginResult {
+  ok: true;
+  run_id: string;
+  run_started_at: string;
+}
+export interface BeginSkipped {
+  ok: true;
+  skipped: 'already_running';
+}
+export type BeginResponse = BeginResult | BeginSkipped;
+
+export async function ingestBegin(
+  ingestUrl: string,
+  triggeredBy: 'manual' | 'cron' | 'internal'
+): Promise<BeginResponse> {
+  const res = await fetch(ingestUrl, {
+    method: 'POST',
+    headers: ingestHeaders(),
+    body: JSON.stringify({ action: 'begin', triggered_by: triggeredBy }),
+  });
+  if (!res.ok) throw new Error(`ingest begin HTTP ${res.status}: ${await res.text()}`);
+  return (await res.json()) as BeginResponse;
 }
 
 /**
- * Batch-upsert all rows into the target padron table, sweep stale rows,
- * and close the run row to success (or note a skipped sweep).
- * Any thrown exception must be caught by the caller, which closes the run to error.
+ * POST a batch of rows to the ingest endpoint.
+ * Retries up to 3 times on network errors / 5xx.
+ * A 409 (run not running) is not retryable — throws with code 'run_not_running'.
  */
-export async function syncTarget(
-  target: PadronTarget,
-  rows: string[][],
+export async function ingestBatch(
+  ingestUrl: string,
   runId: string,
-  pool: Pool
+  syncedAt: string,
+  rows: Record<string, unknown>[]
+): Promise<{ upserted: number; dropped: number }> {
+  const body = JSON.stringify({ action: 'batch', run_id: runId, synced_at: syncedAt, rows });
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(ingestUrl, { method: 'POST', headers: ingestHeaders(), body });
+    } catch (e: any) {
+      if (attempt === 2) throw new Error(`batch network error: ${e.message}`);
+      await sleep(1000 * 2 ** attempt);
+      continue;
+    }
+
+    if (res.status === 409) {
+      const err = new Error('run_not_running') as Error & { code: string };
+      err.code = 'run_not_running';
+      throw err;
+    }
+    if (res.ok) return (await res.json()) as { upserted: number; dropped: number };
+    if (res.status >= 500 && attempt < 2) {
+      await sleep(1000 * 2 ** attempt);
+      continue;
+    }
+    throw new Error(`batch HTTP ${res.status}: ${await res.text()}`);
+  }
+
+  throw new Error('unreachable');
+}
+
+export async function ingestFinish(
+  ingestUrl: string,
+  runId: string,
+  runStartedAt: string,
+  totalLines: number,
+  rowsUpserted: number
+): Promise<{ rows_deleted: number }> {
+  const res = await fetch(ingestUrl, {
+    method: 'POST',
+    headers: ingestHeaders(),
+    body: JSON.stringify({
+      action: 'finish',
+      run_id: runId,
+      run_started_at: runStartedAt,
+      total_lines: totalLines,
+      rows_upserted: rowsUpserted,
+    }),
+  });
+  if (!res.ok) throw new Error(`ingest finish HTTP ${res.status}: ${await res.text()}`);
+  return (await res.json()) as { rows_deleted: number };
+}
+
+/** Signal a failed run to the ingest endpoint. Best-effort — never throws. */
+export async function ingestFail(
+  ingestUrl: string,
+  runId: string,
+  error: string
 ): Promise<void> {
-  const syncedAt = new Date().toISOString();
-
-  // Derive columns once from a sample row so the upsert SQL is target-agnostic.
-  const sample = target.mapRow(rows[0], syncedAt);
-  const cols = Object.keys(sample);
-  const updateCols = cols.filter(c => c !== 'rnc');
-  const setClauses = updateCols.map(c => `${c} = EXCLUDED.${c}`).join(', ');
-
-  let rowsUpserted = 0;
-
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-    const params: unknown[] = [];
-    const valueSets: string[] = [];
-
-    for (const parts of batch) {
-      const mapped = target.mapRow(parts, syncedAt);
-      const placeholders = cols.map(col => {
-        params.push(mapped[col] ?? null);
-        return `$${params.length}`;
-      });
-      valueSets.push(`(${placeholders.join(', ')})`);
+  try {
+    const res = await fetch(ingestUrl, {
+      method: 'POST',
+      headers: ingestHeaders(),
+      body: JSON.stringify({ action: 'fail', run_id: runId, error }),
+    });
+    if (!res.ok) {
+      console.error(`[padron] ingest fail HTTP ${res.status}:`, await res.text().catch(() => ''));
     }
-
-    const sql =
-      `INSERT INTO ${target.padronTable} (${cols.join(', ')}) ` +
-      `VALUES ${valueSets.join(', ')} ` +
-      `ON CONFLICT (rnc) DO UPDATE SET ${setClauses}`;
-
-    await pool.query(sql, params);
-    rowsUpserted += batch.length;
-
-    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-    if (batchNum % 10 === 0) {
-      console.log(
-        `[padron:${target.name}] batch ${batchNum}: ${rowsUpserted.toLocaleString()} rows upserted`
-      );
-    }
+  } catch (e: any) {
+    console.error('[padron] ingest fail delivery error:', e.message);
   }
-
-  // Sweep rows absent from this run only when the file looks complete.
-  // Below the threshold, a truncated DGII file could otherwise wipe the mirror.
-  let rowsDeleted = 0;
-  let sweepNote: string | null = null;
-
-  if (rowsUpserted >= SWEEP_THRESHOLD) {
-    const del = await pool.query(
-      `DELETE FROM ${target.padronTable} WHERE synced_at IS NULL OR synced_at < $1`,
-      [syncedAt]
-    );
-    rowsDeleted = del.rowCount ?? 0;
-  } else {
-    sweepNote = `sweep skipped: below threshold (${rowsUpserted})`;
-    console.log(`[padron:${target.name}] ${sweepNote}`);
-  }
-
-  await pool.query(
-    `UPDATE ${target.runsTable}
-     SET finished_at = now(), status = 'success',
-         total_lines = $1, rows_upserted = $2, rows_deleted = $3, error = $4
-     WHERE id = $5`,
-    [rows.length, rowsUpserted, rowsDeleted, sweepNote, runId]
-  );
-
-  console.log(
-    `[padron:${target.name}] done — ` +
-    `${rowsUpserted.toLocaleString()} upserted, ${rowsDeleted} deleted`
-  );
 }
 
 // ---------------------------------------------------------------------------
 // Target definitions
 // ---------------------------------------------------------------------------
 
-function posMapRow(parts: string[], syncedAt: string): Record<string, unknown> {
+function posMapRow(parts: string[]): Record<string, unknown> {
   return {
     rnc:                 parts[0],
     razon_social:        parts[1],
     nombre_comercial:    parts[2] || null,
     actividad_economica: parts[3] || null,
     estado:              parts[9] || null,
-    synced_at:           syncedAt,
   };
 }
 
-function crmMapRow(parts: string[], syncedAt: string): Record<string, unknown> {
-  return {
-    rnc:              parts[0],
-    razon_social:     parts[1],
-    nombre_comercial: parts[2] || null,
-    actividad:        parts[3] || null,
-    estado:           parts[9] || null,
-    regimen:          parts[10] || null,
-    last_checked:     syncedAt,
-    source:           'DGII_RNC.zip',
-    synced_at:        syncedAt,
-  };
-}
+// TODO(Phase B): add crmMapRow when CRM_INGEST_URL is configured and the CRM row shape is confirmed.
 
 /** Returns all enabled targets based on configured env vars. */
 export function buildTargets(): PadronTarget[] {
   const targets: PadronTarget[] = [];
 
-  if (process.env.POS_DB_URL) {
+  if (process.env.POS_INGEST_URL) {
     targets.push({
-      name:         'pos',
-      dbUrl:        process.env.POS_DB_URL,
-      padronTable:  'dgii_padron',
-      runsTable:    'padron_sync_runs',
-      mapRow:       posMapRow,
+      name:      'pos',
+      ingestUrl: process.env.POS_INGEST_URL,
+      mapRow:    posMapRow,
     });
   }
 
-  if (process.env.CRM_DB_URL) {
-    targets.push({
-      name:         'crm',
-      dbUrl:        process.env.CRM_DB_URL,
-      padronTable:  'dgii_padron_cache',
-      runsTable:    'padron_sync_runs',
-      mapRow:       crmMapRow,
-    });
-  }
+  // TODO(Phase B): CRM target — enable when CRM_INGEST_URL is set and row shape is confirmed.
+  // if (process.env.CRM_INGEST_URL) { ... }
 
   return targets;
 }

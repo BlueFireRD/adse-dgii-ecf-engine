@@ -3,21 +3,24 @@ import { timingSafeEqual } from 'crypto';
 import cron from 'node-cron';
 import {
   PadronTarget,
+  BATCH_SIZE,
   buildTargets,
-  getTargetPool,
   downloadZip,
   extractTxt,
   decodeTxt,
   parseRows,
-  verifyTargetSchema,
-  syncTarget,
+  ingestBegin,
+  ingestBatch,
+  ingestFinish,
+  ingestFail,
 } from './padronSync';
-import { Pool } from 'pg';
 
 export const padronRouter = Router();
 
 // ---------------------------------------------------------------------------
 // Auth — separate key from emisorAuth; rotate independently.
+// Used in BOTH directions: inbound guard on /padron/sync AND outbound
+// x-padron-key header on every ingest call (read by ingestHeaders() in padronSync).
 // ---------------------------------------------------------------------------
 const PADRON_API_KEY = process.env.PADRON_API_KEY || '';
 
@@ -38,89 +41,114 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-flight: insert run row + schema check for a single target.
-// Returns { pool, runId } on success, or writes an error response and returns null.
+// Types
 // ---------------------------------------------------------------------------
-async function prepareTarget(
-  target: PadronTarget,
-  res: Response
-): Promise<{ pool: Pool; runId: string } | null> {
-  const pool = getTargetPool(target.dbUrl);
 
-  const schemaErr = await verifyTargetSchema(pool, target);
-  if (schemaErr) {
-    await pool
-      .query(
-        `INSERT INTO ${target.runsTable} (status, error, started_at)
-         VALUES ('error', $1, now())`,
-        [`schema verification failed: ${schemaErr}`]
-      )
-      .catch(() => {});
-    return null;
-  }
+interface ActiveRun {
+  target: PadronTarget;
+  runId: string;
+  runStartedAt: string;
+}
 
-  // Stale-hygiene: mark any run that has been "running" for > 30 min as error.
-  await pool
-    .query(
-      `UPDATE ${target.runsTable}
-       SET status = 'error', error = 'run abandoned (> 30 min)', finished_at = now()
-       WHERE status = 'running' AND started_at < now() - interval '30 minutes'`
-    )
-    .catch(() => {});
-
-  // Concurrency guard: refuse if another run is active.
-  const { rows: active } = await pool.query(
-    `SELECT 1 FROM ${target.runsTable} WHERE status = 'running' LIMIT 1`
-  );
-  if (active.length > 0) return null; // caller skips this target silently
-
-  const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO ${target.runsTable} (status, started_at) VALUES ('running', now()) RETURNING id`
-  );
-  return { pool, runId: rows[0].id };
+interface RunsEntry {
+  target: string;
+  run_id?: string;
+  skipped?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Main job — download once, fan out to each target.
+// beginAll: call ingest begin for every target and separate active from skipped.
 // ---------------------------------------------------------------------------
-async function runJob(targets: PadronTarget[]): Promise<void> {
+async function beginAll(
+  targets: PadronTarget[],
+  triggeredBy: 'manual' | 'cron' | 'internal'
+): Promise<{ runs: RunsEntry[]; activeRuns: ActiveRun[] }> {
+  const runs: RunsEntry[] = [];
+  const activeRuns: ActiveRun[] = [];
+
+  for (const target of targets) {
+    try {
+      const result = await ingestBegin(target.ingestUrl, triggeredBy);
+      if ('skipped' in result) {
+        runs.push({ target: target.name, skipped: result.skipped });
+        console.log(`[padron:${target.name}] begin: ${result.skipped}`);
+      } else {
+        runs.push({ target: target.name, run_id: result.run_id });
+        activeRuns.push({ target, runId: result.run_id, runStartedAt: result.run_started_at });
+        console.log(`[padron:${target.name}] begin: run_id=${result.run_id}`);
+      }
+    } catch (e: any) {
+      console.error(`[padron:${target.name}] begin failed:`, e.message);
+      runs.push({ target: target.name, skipped: `begin_failed: ${e.message}` });
+    }
+  }
+
+  return { runs, activeRuns };
+}
+
+// ---------------------------------------------------------------------------
+// Main job: download once, fan-out batches to each active run.
+// ---------------------------------------------------------------------------
+async function runJob(activeRuns: ActiveRun[]): Promise<void> {
   console.log('[padron] job started');
 
-  let zipBuffer: Buffer;
-  let rows: string[][];
+  let parsedRows: string[][];
   try {
-    zipBuffer = await downloadZip();
+    const zipBuffer = await downloadZip();
     const txtBuffer = extractTxt(zipBuffer);
     const text = decodeTxt(txtBuffer);
-    rows = parseRows(text);
-    console.log(`[padron] parsed ${rows.length.toLocaleString()} valid rows`);
+    parsedRows = parseRows(text);
+    console.log(`[padron] parsed ${parsedRows.length.toLocaleString()} valid rows`);
   } catch (e: any) {
     console.error('[padron] download/parse failed:', e.message);
+    for (const { target, runId } of activeRuns) {
+      await ingestFail(target.ingestUrl, runId, `download/parse failed: ${e.message}`);
+    }
     return;
   }
 
-  for (const target of targets) {
-    const prep = await prepareTarget(target, null as any).catch(e => {
-      console.error(`[padron:${target.name}] prepareTarget error:`, e.message);
-      return null;
-    });
-    if (!prep) {
-      console.log(`[padron:${target.name}] skipped (schema error, conflict, or prep failure)`);
-      continue;
-    }
-    const { pool, runId } = prep;
+  for (const { target, runId, runStartedAt } of activeRuns) {
+    let rowsUpserted = 0;
+    let aborted = false;
+
     try {
-      await syncTarget(target, rows, runId, pool);
+      for (let i = 0; i < parsedRows.length; i += BATCH_SIZE) {
+        const batchRows = parsedRows.slice(i, i + BATCH_SIZE).map(parts => target.mapRow(parts));
+
+        let result: { upserted: number; dropped: number };
+        try {
+          result = await ingestBatch(target.ingestUrl, runId, runStartedAt, batchRows);
+        } catch (e: any) {
+          if ((e as any).code === 'run_not_running') {
+            console.error(`[padron:${target.name}] batch 409 run_not_running — aborting`);
+            aborted = true;
+            break;
+          }
+          throw e;
+        }
+
+        rowsUpserted += result.upserted;
+
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        if (batchNum % 10 === 0) {
+          console.log(
+            `[padron:${target.name}] batch ${batchNum}: ${rowsUpserted.toLocaleString()} rows upserted`
+          );
+        }
+      }
+
+      if (!aborted) {
+        const { rows_deleted } = await ingestFinish(
+          target.ingestUrl, runId, runStartedAt, parsedRows.length, rowsUpserted
+        );
+        console.log(
+          `[padron:${target.name}] done — ` +
+          `${rowsUpserted.toLocaleString()} upserted, ${rows_deleted} deleted`
+        );
+      }
     } catch (e: any) {
       console.error(`[padron:${target.name}] sync error:`, e.message);
-      await pool
-        .query(
-          `UPDATE ${target.runsTable}
-           SET finished_at = now(), status = 'error', error = $1
-           WHERE id = $2`,
-          [String(e.message).slice(0, 500), runId]
-        )
-        .catch(() => {});
+      await ingestFail(target.ingestUrl, runId, String(e.message).slice(0, 500));
     }
   }
 
@@ -128,15 +156,21 @@ async function runJob(targets: PadronTarget[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// POST /padron/sync — fire-and-forget; returns 202 immediately.
+// POST /padron/sync — calls begin for all targets (fast), returns 202 with run
+// state, then processes active runs fire-and-forget.
 // ---------------------------------------------------------------------------
 padronRouter.post('/padron/sync', padronAuth, async (req: Request, res: Response) => {
   const targets = buildTargets();
   if (targets.length === 0) {
-    return res.status(503).json({ error: 'no targets configured (POS_DB_URL / CRM_DB_URL)' });
+    return res.status(503).json({ error: 'no targets configured (POS_INGEST_URL)' });
   }
-  res.status(202).json({ ok: true, targets: targets.map(t => t.name) });
-  runJob(targets).catch(e => console.error('[padron] runJob uncaught:', e.message));
+
+  const { runs, activeRuns } = await beginAll(targets, 'manual');
+  res.status(202).json({ ok: true, runs });
+
+  if (activeRuns.length > 0) {
+    runJob(activeRuns).catch(e => console.error('[padron] runJob uncaught:', e.message));
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -151,7 +185,10 @@ export function schedulePadronCron(): void {
   cron.schedule(expr, () => {
     const targets = buildTargets();
     if (targets.length === 0) return;
-    runJob(targets).catch(e => console.error('[padron] cron job uncaught:', e.message));
+    (async () => {
+      const { activeRuns } = await beginAll(targets, 'cron');
+      if (activeRuns.length > 0) await runJob(activeRuns);
+    })().catch(e => console.error('[padron] cron job uncaught:', e.message));
   });
   console.log(`[padron] weekly cron registered: ${expr}`);
 }
