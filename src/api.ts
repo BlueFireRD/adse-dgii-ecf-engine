@@ -73,6 +73,23 @@ async function resolveKey(rnc: string): Promise<{ key: KeyMaterial; ephemeral: b
   return { key: generateEphemeralKey(), ephemeral: true };
 }
 
+/**
+ * PSF endpoints must never fall back to DGII_ENV (production since go-live).
+ * Returns the normalized environment string, or null when absent/blank —
+ * callers must 400 on null. Accepted values (case-insensitive): ecf, prod,
+ * produccion, production, certecf, testecf.
+ */
+function requireEnvironment(raw: unknown): string | null {
+  const e = typeof raw === 'string' ? raw.trim() : '';
+  return e.length > 0 ? e : null;
+}
+
+const ENV_REQUIRED_ERROR = {
+  error:
+    'missing "environment" — this endpoint refuses to default to DGII_ENV. ' +
+    'Send environment explicitly: "testecf", "certecf", or "ecf".',
+};
+
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ ok: true, env: process.env.DGII_ENV || 'certecf' });
 });
@@ -170,11 +187,13 @@ app.post('/submit-aprobacion', emisorAuth, async (req: Request, res: Response) =
   }
 });
 
-/** POST /submit { xml, kind, encf, environment? } -> DGII response verbatim. */
+/** POST /submit { xml, kind, encf, environment } -> DGII response verbatim. */
 app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
   try {
     const { xml, kind, encf, environment } = req.body;
     if (!xml || !kind) return res.status(400).json({ error: 'missing "xml" or "kind"' });
+    const env = requireEnvironment(environment);
+    if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
     const rnc = rncFromXml(xml);
     const { key, ephemeral } = await resolveKey(rnc);
     if (ephemeral) {
@@ -182,7 +201,6 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
         error: 'No P12 configured; refusing to submit to DGII with an ephemeral cert. Set P12_PATH and P12_PASSWORD.',
       });
     }
-    const env = environment ? String(environment) : undefined;
     const result = kind === 'rfce'
       ? await sendRfce(xml, encf || 'doc', key, env)
       : await sendEcf(xml, encf || 'doc', key, env);
@@ -207,15 +225,16 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
 });
 
 /**
- * POST /emitir-consumo { ...caseFields, environment? } -> DGII verdict (sync RFCE).
+ * POST /emitir-consumo { ...caseFields, environment } -> DGII verdict (sync RFCE).
  * Two-step: sign the full e-CF 32 to derive codigoSeguridad, embed it in
  * the RFCE summary, then sign and submit the RFCE.
  */
 app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
   try {
+    const env = requireEnvironment(req.body.environment);
+    if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
     const data = normalize(req.body);
     const rnc = data.RNCEmisor || ADSE_RNC;
-    const env = req.body.environment ? String(req.body.environment) : undefined;
     const { key, ephemeral } = await resolveKey(rnc);
     if (ephemeral) {
       return res.status(412).json({
@@ -293,10 +312,12 @@ app.post('/secuencias', emisorAuth, async (req: Request, res: Response) => {
     if (!rnc || !ecfType || desde == null || hasta == null || actual == null) {
       return res.status(400).json({ error: 'missing required fields: rnc, ecfType, desde, hasta, actual' });
     }
+    const env = requireEnvironment(environment);
+    if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
     await upsertSequence({
       rnc: String(rnc),
       ecfType: String(ecfType),
-      environment: String(environment || 'certecf'),
+      environment: env,
       desde: Number(desde),
       hasta: Number(hasta),
       actual: Number(actual),
@@ -319,19 +340,22 @@ app.post('/reservar-encf', emisorAuth, async (req: Request, res: Response) => {
     if (!rnc || !ecfType) {
       return res.status(400).json({ error: 'missing required fields: rnc, ecfType' });
     }
-    const encf = await reservarEncf(String(rnc), String(ecfType), String(environment || 'certecf'));
+    const env = requireEnvironment(environment);
+    if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
+    const encf = await reservarEncf(String(rnc), String(ecfType), env);
     res.json({ encf });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/** POST /consulta { trackId, rnc?, environment? } -> DGII async verdict for a trackId. */
+/** POST /consulta { trackId, rnc?, environment } -> DGII async verdict for a trackId. */
 app.post('/consulta', emisorAuth, async (req: Request, res: Response) => {
   try {
     const { trackId, rnc, environment } = req.body;
     if (!trackId) return res.status(400).json({ error: 'missing "trackId"' });
-    const env = environment ? String(environment) : undefined;
+    const env = requireEnvironment(environment);
+    if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
     const { key, ephemeral } = await resolveKey(rnc || ADSE_RNC);
     if (ephemeral) {
       return res.status(412).json({
