@@ -86,5 +86,42 @@ export async function runMigration(): Promise<void> {
       PRIMARY KEY (rnc, ecf_type, environment)
     )
   `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tenant_registry (
+      rnc          TEXT PRIMARY KEY,
+      display_name TEXT,
+      channel      TEXT NOT NULL DEFAULT 'crm'
+                   CHECK (channel IN ('crm','pos','external_api')),
+      status       TEXT NOT NULL DEFAULT 'onboarding'
+                   CHECK (status IN ('onboarding','active','offboarding','closed')),
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tenant_certifications (
+      rnc            TEXT PRIMARY KEY REFERENCES tenant_registry(rnc),
+      state          TEXT NOT NULL DEFAULT 'prerequisites_check',
+      required_types JSONB NOT NULL DEFAULT '[]',
+      updated_by     TEXT,
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tenant_lifecycle_events (
+      id         BIGSERIAL PRIMARY KEY,
+      rnc        TEXT NOT NULL,
+      from_state TEXT,
+      to_state   TEXT NOT NULL,
+      actor      TEXT NOT NULL,
+      evidence   JSONB,
+      notes      TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_lifecycle_events_rnc
+      ON tenant_lifecycle_events (rnc, created_at)
+  `);
   console.log('[db] schema OK');
 }

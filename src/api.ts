@@ -11,6 +11,13 @@ import { keyForRnc, upsertCert, reservarEncf, upsertSequence } from './certStore
 import { sendEcf, sendRfce, sendAprobacion, authenticate, consultaResultado } from './dgiiClient';
 import { runMigration } from './db';
 import { RFCE_ENCFS } from './types';
+import {
+  upsertTenant,
+  listTenants,
+  getTenantFull,
+  advanceCertification,
+  genesisCertification,
+} from './lifecycle';
 import { receptorRouter } from './receptor';
 import { padronRouter, schedulePadronCron } from './padronRouter';
 import { extractFechaFirma, buildEcfQrUrl, buildFcQrUrl, xmlTag } from './qrBuilder';
@@ -370,6 +377,104 @@ app.post('/consulta', emisorAuth, async (req: Request, res: Response) => {
     res.status(result.status).type('application/json').send(result.body);
   } catch (e: any) {
     res.status(502).json({ error: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tenant lifecycle endpoints — Phase C
+// ---------------------------------------------------------------------------
+
+const VALID_RNC_RE = /^\d{9}$|^\d{11}$/;
+const VALID_REGISTRY_STATUSES = new Set(['onboarding', 'active', 'offboarding', 'closed']);
+const VALID_CHANNELS = new Set(['crm', 'pos', 'external_api']);
+
+/** POST /tenants — upsert registry row. */
+app.post('/tenants', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { rnc, displayName, channel, status } = req.body;
+    if (!rnc || !VALID_RNC_RE.test(String(rnc))) {
+      return res.status(400).json({ error: 'rnc must be 9 or 11 digits' });
+    }
+    if (channel !== undefined && !VALID_CHANNELS.has(String(channel))) {
+      return res.status(400).json({ error: `channel must be one of: ${[...VALID_CHANNELS].join(', ')}` });
+    }
+    if (status !== undefined && !VALID_REGISTRY_STATUSES.has(String(status))) {
+      return res.status(400).json({ error: `status must be one of: ${[...VALID_REGISTRY_STATUSES].join(', ')}` });
+    }
+    const row = await upsertTenant({
+      rnc:         String(rnc),
+      displayName: displayName != null ? String(displayName) : null,
+      channel:     channel     != null ? String(channel)     : null,
+      status:      status      != null ? String(status)      : null,
+    });
+    res.json(row);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** GET /tenants — registry list with cert state. */
+app.get('/tenants', emisorAuth, async (_req: Request, res: Response) => {
+  try {
+    res.json(await listTenants());
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** GET /certificaciones/:rnc — full tenant + certification + events. */
+app.get('/certificaciones/:rnc', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const result = await getTenantFull(req.params.rnc);
+    if (!result) return res.status(404).json({ error: 'tenant not found' });
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** POST /certificaciones/:rnc/advance — state machine transition. */
+app.post('/certificaciones/:rnc/advance', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { toState, actor, evidence, notes, regress } = req.body;
+    if (!toState) return res.status(400).json({ error: 'missing required field: toState' });
+    if (!actor)   return res.status(400).json({ error: 'missing required field: actor' });
+    const result = await advanceCertification(req.params.rnc, {
+      toState:  String(toState),
+      actor:    String(actor),
+      evidence: evidence,
+      notes:    notes != null ? String(notes) : undefined,
+      regress:  regress === true || regress === 'true',
+    });
+    if ('error' in result) {
+      const { statusCode, ...body } = result;
+      return res.status(statusCode).json(body);
+    }
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** POST /certificaciones/:rnc/genesis — backfill for pre-Phase-C tenants. */
+app.post('/certificaciones/:rnc/genesis', emisorAuth, async (req: Request, res: Response) => {
+  try {
+    const { state, actor, notes } = req.body;
+    if (!state)  return res.status(400).json({ error: 'missing required field: state' });
+    if (!actor)  return res.status(400).json({ error: 'missing required field: actor' });
+    if (!notes)  return res.status(400).json({ error: 'missing required field: notes' });
+    const result = await genesisCertification(req.params.rnc, {
+      state:  String(state),
+      actor:  String(actor),
+      notes:  String(notes),
+    });
+    if ('error' in result) {
+      const { statusCode, ...body } = result;
+      return res.status(statusCode).json(body);
+    }
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
