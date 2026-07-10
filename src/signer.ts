@@ -173,6 +173,40 @@ export function extractSecurityCode(signedXml: string): string {
   return sv.slice(0, 6);
 }
 
+/**
+ * Extract the signer's identity (RNC when detectable, else CN) from the
+ * X509Certificate embedded in a signed XML document. Best-effort; returns
+ * 'unknown' on any parse failure.
+ */
+export function extractSignerIdentity(signedXml: string): string {
+  try {
+    const doc = new DOMParser().parseFromString(signedXml, 'text/xml');
+    const certs = doc.getElementsByTagNameNS(
+      'http://www.w3.org/2000/09/xmldsig#',
+      'X509Certificate'
+    );
+    if (!certs || !certs.length) return 'unknown';
+    const b64 = (certs[0].textContent || '').replace(/\s+/g, '');
+    const lines = b64.match(/.{1,64}/g) || [b64];
+    const pem =
+      `-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----`;
+    const cert = forge.pki.certificateFromPem(pem);
+    // Prefer a subject attribute whose value is purely a 9 or 11-digit RNC
+    for (const attr of (cert.subject.attributes as forge.pki.CertificateField[])) {
+      const val = String(attr.value || '').trim();
+      if (/^\d{9}$|^\d{11}$/.test(val)) return val;
+    }
+    // Fallback: extract RNC from CN like "133470616 - Company Name"
+    const cn = cert.subject.getField('CN');
+    if (cn) {
+      const m = String(cn.value).match(/\b(\d{9}|\d{11})\b/);
+      if (m) return m[1];
+      return String(cn.value).slice(0, 100);
+    }
+  } catch { /* ignore */ }
+  return 'unknown';
+}
+
 /** Verify a signed document's signature against the embedded certificate. */
 export function verifyXml(signedXml: string): boolean {
   const { DOMParser } = require('@xmldom/xmldom');

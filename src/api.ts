@@ -20,6 +20,7 @@ import {
 } from './lifecycle';
 import { receptorRouter } from './receptor';
 import { padronRouter, schedulePadronCron } from './padronRouter';
+import { checkEncoding } from './inputGuard';
 import { extractFechaFirma, buildEcfQrUrl, buildFcQrUrl, xmlTag } from './qrBuilder';
 
 const ADSE_RNC = '133470616';
@@ -401,6 +402,8 @@ app.post('/tenants', emisorAuth, async (req: Request, res: Response) => {
     if (status !== undefined && !VALID_REGISTRY_STATUSES.has(String(status))) {
       return res.status(400).json({ error: `status must be one of: ${[...VALID_REGISTRY_STATUSES].join(', ')}` });
     }
+    const encErr = checkEncoding({ displayName: displayName != null ? String(displayName) : '' });
+    if (encErr) return res.status(400).json(encErr);
     const row = await upsertTenant({
       rnc:         String(rnc),
       displayName: displayName != null ? String(displayName) : null,
@@ -439,6 +442,8 @@ app.post('/certificaciones/:rnc/advance', emisorAuth, async (req: Request, res: 
     const { toState, actor, evidence, notes, regress } = req.body;
     if (!toState) return res.status(400).json({ error: 'missing required field: toState' });
     if (!actor)   return res.status(400).json({ error: 'missing required field: actor' });
+    const encErr = checkEncoding({ actor: String(actor), notes: notes != null ? String(notes) : '', evidence: evidence ?? {} });
+    if (encErr) return res.status(400).json(encErr);
     const result = await advanceCertification(req.params.rnc, {
       toState:  String(toState),
       actor:    String(actor),
@@ -463,6 +468,8 @@ app.post('/certificaciones/:rnc/genesis', emisorAuth, async (req: Request, res: 
     if (!state)  return res.status(400).json({ error: 'missing required field: state' });
     if (!actor)  return res.status(400).json({ error: 'missing required field: actor' });
     if (!notes)  return res.status(400).json({ error: 'missing required field: notes' });
+    const encErr = checkEncoding({ actor: String(actor), notes: String(notes) });
+    if (encErr) return res.status(400).json(encErr);
     const result = await genesisCertification(req.params.rnc, {
       state:  String(state),
       actor:  String(actor),

@@ -123,5 +123,40 @@ export async function runMigration(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_lifecycle_events_rnc
       ON tenant_lifecycle_events (rnc, created_at)
   `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS receptor_seeds (
+      valor      TEXT PRIMARY KEY,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS receptor_received_encf (
+      rnc_comprador TEXT NOT NULL,
+      encf          TEXT NOT NULL,
+      first_seen    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (rnc_comprador, encf)
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS receptor_documents (
+      id            BIGSERIAL PRIMARY KEY,
+      kind          TEXT NOT NULL CHECK (kind IN ('recepcion','aprobacion_comercial','recepcion_fc')),
+      rnc_comprador TEXT,
+      rnc_emisor    TEXT,
+      encf          TEXT,
+      tipo          TEXT,
+      verdict       TEXT NOT NULL,
+      xml           TEXT NOT NULL,
+      response_xml  TEXT,
+      received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      forwarded_at  TIMESTAMPTZ,
+      forward_error TEXT
+    )
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_receptor_docs_tenant
+      ON receptor_documents (rnc_comprador, received_at)
+  `);
   console.log('[db] schema OK');
 }
