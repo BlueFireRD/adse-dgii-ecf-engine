@@ -158,7 +158,10 @@ async function forwardDocument(
       channel === 'crm' ? process.env.CRM_RECIBIDOS_INGEST_URL :
       channel === 'pos' ? process.env.POS_RECIBIDOS_INGEST_URL :
       null;
-    if (!ingestUrl) return; // store-only until C3 ingest is deployed
+    if (!ingestUrl) {
+      console.log(`[receptor] forward skipped for ${rncComprador}: no ingest URL for channel ${channel ?? '(none)'}`);
+      return;
+    }
 
     const padronKey = process.env.PADRON_API_KEY || '';
     const body = JSON.stringify({ kind, rncComprador, verdict, xml });
@@ -185,6 +188,7 @@ async function forwardDocument(
     }
 
     if (lastError) {
+      console.error(`[receptor] forward failed docId=${docId}: ${lastError}`);
       await db.query(
         `UPDATE receptor_documents SET forward_error = $1 WHERE id = $2`,
         [lastError.slice(0, 500), docId]

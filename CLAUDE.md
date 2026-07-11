@@ -99,6 +99,8 @@ code must fail closed when one is absent.
 - Production tipo-32 sequence skip near sale #60 (collision with accepted `E320000000061`).
 - Real TesteCF endpoint set or explicit rejection of `testecf` platform-wide.
 - `ecf-dgii-auth` retirement (one remaining legacy consumer).
+- Platform-wide `testecf` silent remap fix: currently collapses to certecf hosts in `dgiiClient.endpointsFor` instead of hard-rejecting; `/submit` and all DGII-touching callers should 400 on `testecf` (C5 D2).
+- `keyForRnc` global anchor-only restriction: env-cert fallback must be limited to RNC `133470616` in all code paths; non-anchor tenants must require a `tenant_certs` row (C5 D4).
 
 ## Reporting conventions
 
