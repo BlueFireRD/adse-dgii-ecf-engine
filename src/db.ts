@@ -158,5 +158,75 @@ export async function runMigration(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_receptor_docs_tenant
       ON receptor_documents (rnc_comprador, received_at)
   `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tenant_test_sets (
+      id           BIGSERIAL PRIMARY KEY,
+      rnc          TEXT NOT NULL,
+      kind         TEXT NOT NULL CHECK (kind IN ('ecf','rfce','acecf')),
+      cases        JSONB NOT NULL,
+      case_count   INT  NOT NULL,
+      source_note  TEXT,
+      uploaded_by  TEXT NOT NULL,
+      active       BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_test_sets_active
+      ON tenant_test_sets (rnc, kind) WHERE active
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS test_runs (
+      id               BIGSERIAL PRIMARY KEY,
+      rnc              TEXT NOT NULL,
+      scope            TEXT NOT NULL CHECK (scope IN ('set_pruebas','acecf')),
+      environment      TEXT NOT NULL,
+      dry_run          BOOLEAN NOT NULL,
+      actor            TEXT NOT NULL,
+      status           TEXT NOT NULL CHECK (status IN
+        ('running','completed','completed_with_errors','failed','cancelled','interrupted')),
+      cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+      params           JSONB,
+      totals           JSONB,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+      started_at       TIMESTAMPTZ,
+      finished_at      TIMESTAMPTZ
+    )
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS idx_test_runs_rnc
+      ON test_runs (rnc, created_at DESC)
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS test_run_cases (
+      run_id           BIGINT NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+      position         INT NOT NULL,
+      encf             TEXT NOT NULL,
+      tipo             TEXT,
+      kind             TEXT NOT NULL CHECK (kind IN ('ecf','rfce','acecf')),
+      status           TEXT NOT NULL CHECK (status IN
+        ('pending','preparing','sent','aceptado','rechazado','already_accepted',
+         'skipped','error','cancelled')),
+      track_id         TEXT,
+      mensajes         JSONB,
+      codigo_seguridad TEXT,
+      fecha_firma      TEXT,
+      qr_url           TEXT,
+      signed_xml       TEXT,
+      full_invoice_xml TEXT,
+      error            TEXT,
+      updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (run_id, position)
+    )
+  `);
+
+  // Surface any run that was mid-flight when the process restarted.
+  await db.query(`
+    UPDATE test_runs SET status='interrupted', finished_at=now() WHERE status='running'
+  `);
+
   console.log('[db] schema OK');
 }

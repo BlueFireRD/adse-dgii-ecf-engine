@@ -22,6 +22,7 @@ import { receptorRouter } from './receptor';
 import { padronRouter, schedulePadronCron } from './padronRouter';
 import { checkEncoding } from './inputGuard';
 import { extractFechaFirma, buildEcfQrUrl, buildFcQrUrl, xmlTag } from './qrBuilder';
+import { buildOrchestratorRouter } from './orchestrator';
 
 const ADSE_RNC = '133470616';
 
@@ -484,6 +485,9 @@ app.post('/certificaciones/:rnc/genesis', emisorAuth, async (req: Request, res: 
     res.status(500).json({ error: e.message });
   }
 });
+
+// Orchestrator routes (test-sets + test-runs) — under emisorAuth
+app.use(emisorAuth, buildOrchestratorRouter());
 
 function isRfce(data: Record<string, string>, type: string): boolean {
   return type === '32' && RFCE_ENCFS.includes(data.ENCF);
