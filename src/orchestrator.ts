@@ -373,10 +373,10 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
       );
       // Dependency order: notas (tipo 33/34) after their referenced ECF
       const sorted = dependencyOrder(ecfCases);
-      // (1) non-nota e-CF
+      // (1) non-nota e-CF — exclude RFCE members (they materialize only as kind='rfce' in loop 2)
       for (const c of sorted) {
         const tipo = String(c.TipoeCF ?? c.Tipo ?? '');
-        if (tipo !== '33' && tipo !== '34') {
+        if (tipo !== '33' && tipo !== '34' && !rfceEncfs.has(String(c.ENCF))) {
           orderedCases.push({
             encf: String(c.ENCF), tipo, kind: 'ecf',
             status: skipSet.has(String(c.ENCF)) ? 'skipped' : 'pending',
