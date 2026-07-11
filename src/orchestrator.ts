@@ -35,6 +35,11 @@ const ANCHOR_RNC = '133470616';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+function has1209(body: unknown): boolean {
+  const m = (body as any)?.mensajes ?? (body as any)?.Mensajes;
+  return Array.isArray(m) && m.some((x: any) => String(x?.codigo ?? x?.Codigo) === '1209');
+}
+
 function byTipoCounts(cases: Record<string, unknown>[], kind: string): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const c of cases) {
@@ -464,7 +469,11 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
       });
     });
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    if (e.code === '23505') {
+      res.status(409).json({ error: 'run already in progress (concurrent)' });
+    } else {
+      res.status(500).json({ error: e.message });
+    }
   }
 }
 
@@ -684,17 +693,11 @@ async function runExecutor(
         let mensajes: unknown = null;
         try { mensajes = JSON.parse(result.body); } catch { mensajes = result.body; }
 
-        // Check for 1209 (already accepted)
-        const bodyStr = result.body;
-        const is1209 = bodyStr.includes('1209');
-        const isAceptado = bodyStr.toLowerCase().includes('aceptado') && !bodyStr.toLowerCase().includes('rechazado');
-
-        if (is1209) {
+        if (has1209(mensajes)) {
           c.status = 'already_accepted';
           acceptedEncfs.add(c.encf);
           await updateCase(runId, pos, { status: 'already_accepted', mensajes });
         } else {
-          // poll for async verdict
           const parsedBody: any = typeof mensajes === 'object' ? mensajes : {};
           const trackId = parsedBody?.trackId ?? parsedBody?.TrackId ?? parsedBody?.id ?? '';
           if (trackId) {
@@ -703,13 +706,19 @@ async function runExecutor(
             c.status = verdict.status as any;
             if (verdict.status === 'aceptado') acceptedEncfs.add(c.encf);
             await updateCase(runId, pos, { status: verdict.status, mensajes: verdict.mensajes });
-          } else if (isAceptado) {
-            c.status = 'aceptado';
-            acceptedEncfs.add(c.encf);
-            await updateCase(runId, pos, { status: 'aceptado', mensajes });
           } else {
-            c.status = 'rechazado';
-            await updateCase(runId, pos, { status: 'rechazado', mensajes });
+            const estado = String(parsedBody?.estado ?? parsedBody?.Estado ?? '').trim().toLowerCase();
+            if (estado.startsWith('aceptado')) {
+              c.status = 'aceptado';
+              acceptedEncfs.add(c.encf);
+              await updateCase(runId, pos, { status: 'aceptado', mensajes });
+            } else if (estado === 'rechazado') {
+              c.status = 'rechazado';
+              await updateCase(runId, pos, { status: 'rechazado', mensajes });
+            } else {
+              c.status = 'error';
+              await updateCase(runId, pos, { status: 'error', mensajes });
+            }
           }
         }
         cases[i] = { ...c };
@@ -726,18 +735,20 @@ async function runExecutor(
         let mensajes: unknown = null;
         try { mensajes = JSON.parse(result.body); } catch { mensajes = result.body; }
 
-        const bodyStr = result.body;
-        const is1209 = bodyStr.includes('1209');
-        const isAceptado = bodyStr.toLowerCase().includes('aceptado');
-
-        if (is1209) {
+        if (has1209(mensajes)) {
           c.status = 'already_accepted';
           acceptedEncfs.add(c.encf);
-        } else if (isAceptado) {
-          c.status = 'aceptado';
-          acceptedEncfs.add(c.encf);
         } else {
-          c.status = 'rechazado';
+          const parsedRfce: any = typeof mensajes === 'object' ? mensajes : {};
+          const estadoRfce = String(parsedRfce?.estado ?? parsedRfce?.Estado ?? '').trim().toLowerCase();
+          if (estadoRfce.startsWith('aceptado')) {
+            c.status = 'aceptado';
+            acceptedEncfs.add(c.encf);
+          } else if (estadoRfce === 'rechazado') {
+            c.status = 'rechazado';
+          } else {
+            c.status = 'error';
+          }
         }
         await updateCase(runId, pos, { status: c.status, mensajes });
         cases[i] = { ...c };
@@ -754,8 +765,15 @@ async function runExecutor(
         let mensajes: unknown = null;
         try { mensajes = JSON.parse(result.body); } catch { mensajes = result.body; }
 
-        const isAceptado = result.body.toLowerCase().includes('aceptado');
-        c.status = isAceptado ? 'aceptado' : 'rechazado';
+        const parsedAcecf: any = typeof mensajes === 'object' ? mensajes : {};
+        const estadoAcecf = String(parsedAcecf?.estado ?? parsedAcecf?.Estado ?? '').trim().toLowerCase();
+        if (estadoAcecf.startsWith('aceptado')) {
+          c.status = 'aceptado';
+        } else if (estadoAcecf === 'rechazado') {
+          c.status = 'rechazado';
+        } else {
+          c.status = 'error';
+        }
         await updateCase(runId, pos, { status: c.status, mensajes });
         cases[i] = { ...c };
       }
@@ -787,12 +805,10 @@ async function pollVerdict(
     try { body = JSON.parse(result.body); } catch { body = result.body; }
     const estado = String(body?.estado ?? body?.Estado ?? '').toLowerCase();
     if (!estado || estado === 'en proceso' || estado === 'en_proceso') continue;
-    if (estado === 'aceptado') return { status: 'aceptado', mensajes: body };
+    if (estado.startsWith('aceptado')) return { status: 'aceptado', mensajes: body };
     if (estado === 'rechazado') return { status: 'rechazado', mensajes: body };
-    // Code 1209 in poll response
-    const bodyStr = result.body;
-    if (bodyStr.includes('1209')) return { status: 'already_accepted', mensajes: body };
-    return { status: 'rechazado', mensajes: body };
+    if (has1209(body)) return { status: 'already_accepted', mensajes: body };
+    return { status: 'error', mensajes: body };
   }
   return { status: 'error', mensajes: { error: 'no verdict after 14 polls' } };
 }

@@ -199,6 +199,10 @@ export async function runMigration(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_test_runs_rnc
       ON test_runs (rnc, created_at DESC)
   `);
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_test_runs_running
+      ON test_runs (rnc) WHERE status = 'running'
+  `);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS test_run_cases (
