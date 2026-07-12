@@ -27,6 +27,9 @@ ADSE (RNC `133470616`) is the anchor tenant and is **live in DGII production**.
 7. **Do not auto-advance certification state.** `tenant_certifications` /
    `tenant_lifecycle_events` mutate only through `/certificaciones/:rnc/advance` and
    `/genesis`, driven by staff. Tooling attaches run/evidence references; humans advance.
+8. **Lovable MCP query tool is SELECT-only.** Any INSERT/UPDATE/DELETE against a platform
+   database requires Pedro's explicit written authorization in the current brief — a STOP
+   condition in a brief is never satisfied by performing the mutation yourself.
 
 ## Legacy scripts — reference only, never run, never import
 
