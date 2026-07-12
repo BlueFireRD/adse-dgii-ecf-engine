@@ -29,9 +29,37 @@ import { normalize } from './dataset';
 import { KeyMaterial } from './signer';
 
 const VALID_RNC_RE = /^\d{9}$|^\d{11}$/;
-const VALID_KINDS = new Set(['ecf', 'rfce', 'acecf']);
+const VALID_KINDS = new Set(['ecf', 'rfce', 'acecf', 'paso4_plan']);
 const ACTIVE_REGISTRY_STATUSES = new Set(['onboarding', 'active']);
 const ANCHOR_RNC = '133470616';
+
+// ── Paso-4 plan type + reKey (DB-sourced; no file I/O) ────────────────────────
+
+interface Paso4Plan {
+  orden: number | string;
+  tipo: string;
+  nuevo_encf: string;
+  origen_paso2: string;
+  fecha: string;
+  rnc_comprador: string;
+  monto_total: string;
+  itbis: string;
+  doc_class: string;
+  qr: string;
+  ncf_modificado_override?: string;
+  fecha_ncf_modificado_override?: string;
+  fecha_override?: string;
+  indicador_nota_credito_override?: string;
+}
+
+function reKeyPaso4(origen: Record<string, unknown>, plan: Paso4Plan): Record<string, unknown> {
+  const fecha = plan.fecha_override || plan.fecha;
+  const out: Record<string, unknown> = { ...origen, ENCF: plan.nuevo_encf, FechaEmision: fecha };
+  if (plan.ncf_modificado_override) out.NCFModificado = plan.ncf_modificado_override;
+  if (plan.fecha_ncf_modificado_override) out.FechaNCFModificado = plan.fecha_ncf_modificado_override;
+  if (plan.indicador_nota_credito_override !== undefined) out.IndicadorNotaCredito = plan.indicador_nota_credito_override;
+  return out;
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -45,7 +73,9 @@ function byTipoCounts(cases: Record<string, unknown>[], kind: string): Record<st
   for (const c of cases) {
     const key = kind === 'acecf'
       ? String((c as any).Estado ?? 'unknown')
-      : String((c as any).TipoeCF ?? (c as any).Tipo ?? 'unknown');
+      : kind === 'paso4_plan'
+        ? String((c as any).tipo ?? 'unknown')
+        : String((c as any).TipoeCF ?? (c as any).Tipo ?? 'unknown');
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
@@ -98,7 +128,7 @@ async function handleUploadTestSet(req: Request, res: Response): Promise<void> {
 
     // 3. kind + uploadedBy
     if (!kind || !VALID_KINDS.has(String(kind))) {
-      res.status(400).json({ error: 'kind must be one of: ecf, rfce, acecf' });
+      res.status(400).json({ error: 'kind must be one of: ecf, rfce, acecf, paso4_plan' });
       return;
     }
     if (!uploadedBy || !String(uploadedBy).trim()) {
@@ -155,8 +185,72 @@ async function handleUploadTestSet(req: Request, res: Response): Promise<void> {
       if (caseErr) { res.status(400).json({ error: `cases[${i}]: ${caseErr.error}` }); return; }
     }
 
-    // 6. rfce orphan check
+    // 6. paso4_plan-specific validation
     const kindStr = String(kind);
+    if (kindStr === 'paso4_plan') {
+      // Required fields: orden (coercible int), nuevo_encf, origen_paso2, tipo, doc_class
+      const p4BadRows: number[] = [];
+      for (let i = 0; i < cases.length; i++) {
+        const c = cases[i] as any;
+        const ok = c.orden != null && !isNaN(Number(c.orden))
+          && c.nuevo_encf != null && String(c.nuevo_encf).trim() !== ''
+          && c.origen_paso2 != null && String(c.origen_paso2).trim() !== ''
+          && c.tipo != null && String(c.tipo).trim() !== ''
+          && c.doc_class != null && String(c.doc_class).trim() !== '';
+        if (!ok) p4BadRows.push(i);
+      }
+      if (p4BadRows.length > 0) {
+        res.status(422).json({
+          error: 'paso4_plan rows missing required fields (orden, nuevo_encf, origen_paso2, tipo, doc_class)',
+          offending_rows: p4BadRows,
+        });
+        return;
+      }
+      // nuevo_encf must be unique within the plan
+      const allNew = (cases as any[]).map((c: any) => String(c.nuevo_encf));
+      if (new Set(allNew).size !== allNew.length) {
+        const seen = new Set<string>();
+        const dupes = allNew.filter(e => { if (seen.has(e)) return true; seen.add(e); return false; });
+        res.status(422).json({ error: 'nuevo_encf must be unique within the plan', duplicates: [...new Set(dupes)] });
+        return;
+      }
+      // Tenant must have an active ecf set; every origen_paso2 must be in it
+      const db2 = getPool();
+      const { rows: ecfSetRows } = await db2.query<{ cases: any[] }>(
+        `SELECT cases FROM tenant_test_sets WHERE rnc = $1 AND kind = 'ecf' AND active`,
+        [String(rnc)]
+      );
+      if (!ecfSetRows.length) {
+        res.status(422).json({ error: 'missing required active test set: ecf' });
+        return;
+      }
+      const ecfEncfs = new Set<string>((ecfSetRows[0].cases ?? []).map((c: any) => String(c.ENCF)));
+      const orphans = (cases as any[]).map((c: any) => String(c.origen_paso2)).filter(e => !ecfEncfs.has(e));
+      if (orphans.length > 0) {
+        res.status(422).json({ error: 'origen_paso2 not found in active ecf set', orphans });
+        return;
+      }
+      // For consumo rows: active rfce set required and origen_paso2 must be in it
+      const consumoRows = (cases as any[]).filter((c: any) => /RFCE/i.test(String(c.doc_class ?? '')));
+      if (consumoRows.length > 0) {
+        const { rows: rfceSetRows } = await db2.query<{ cases: any[] }>(
+          `SELECT cases FROM tenant_test_sets WHERE rnc = $1 AND kind = 'rfce' AND active`,
+          [String(rnc)]
+        );
+        if (!rfceSetRows.length) {
+          res.status(422).json({ error: 'missing required active test set: rfce (needed for consumo rows)' });
+          return;
+        }
+        const rfceEncfs = new Set<string>((rfceSetRows[0].cases ?? []).map((c: any) => String(c.ENCF)));
+        const consumoOrphans = consumoRows.map((c: any) => String(c.origen_paso2)).filter(e => !rfceEncfs.has(e));
+        if (consumoOrphans.length > 0) {
+          res.status(422).json({ error: 'consumo origen_paso2 not found in active rfce set', consumo_orphans: consumoOrphans });
+          return;
+        }
+      }
+    }
+
+    // 7. rfce orphan check
     if (kindStr === 'rfce') {
       const db = getPool();
       const { rows: ecfSetRows } = await db.query<{ cases: any[] }>(
@@ -273,9 +367,9 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
     }
 
     // 2. other field validation
-    const VALID_SCOPES = new Set(['set_pruebas', 'acecf']);
+    const VALID_SCOPES = new Set(['set_pruebas', 'acecf', 'simulacion']);
     if (!scope || !VALID_SCOPES.has(String(scope))) {
-      res.status(400).json({ error: 'scope must be one of: set_pruebas, acecf' });
+      res.status(400).json({ error: 'scope must be one of: set_pruebas, acecf, simulacion' });
       return;
     }
     if (!actor || !String(actor).trim()) {
@@ -337,6 +431,26 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
       res.status(422).json({ error: 'missing required active test set: acecf' });
       return;
     }
+    if (scopeStr === 'simulacion') {
+      if (!presentKinds.has('paso4_plan')) {
+        res.status(422).json({ error: 'missing required active test set: paso4_plan' });
+        return;
+      }
+      if (!presentKinds.has('ecf')) {
+        res.status(422).json({ error: 'missing required active test set: ecf' });
+        return;
+      }
+      // rfce required only if any plan row is consumo
+      const { rows: planPeek } = await db.query<{ cases: any[] }>(
+        `SELECT cases FROM tenant_test_sets WHERE rnc = $1 AND kind = 'paso4_plan' AND active`,
+        [String(rnc)]
+      );
+      const planPeekRows: any[] = planPeek[0]?.cases ?? [];
+      if (planPeekRows.some((r: any) => /RFCE/i.test(String(r.doc_class ?? ''))) && !presentKinds.has('rfce')) {
+        res.status(422).json({ error: 'missing required active test set: rfce (needed for consumo rows)' });
+        return;
+      }
+    }
 
     // 6. concurrency guard
     const { rows: runningRows } = await db.query<{ id: string }>(
@@ -351,7 +465,11 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
     const skipSet = new Set<string>((skipEncfs ?? []).map(String));
 
     // Load active sets needed for this scope
-    const kindsNeeded = scopeStr === 'set_pruebas' ? ['ecf', 'rfce'] : ['acecf'];
+    const kindsNeeded = scopeStr === 'set_pruebas'
+      ? ['ecf', 'rfce']
+      : scopeStr === 'simulacion'
+        ? ['paso4_plan', 'ecf', 'rfce']
+        : ['acecf'];
     const { rows: loadedSets } = await db.query<{ kind: string; cases: any[] }>(
       `SELECT kind, cases FROM tenant_test_sets WHERE rnc = $1 AND active AND kind = ANY($2::text[])`,
       [String(rnc), kindsNeeded]
@@ -403,6 +521,42 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
             encf: String(c.ENCF), tipo, kind: 'ecf',
             status: skipSet.has(String(c.ENCF)) ? 'skipped' : 'pending',
             caseData: c,
+          });
+        }
+      }
+    } else if (scopeStr === 'simulacion') {
+      // Materialize from paso4_plan rows; sort by orden ASC
+      const planRows = (setsByKind['paso4_plan'] ?? []).slice().sort(
+        (a: any, b: any) => Number(a.orden) - Number(b.orden)
+      );
+      const ecfByEncf = new Map<string, any>(
+        (setsByKind['ecf'] ?? []).map((c: any) => [String(c.ENCF), c])
+      );
+      const rfceByEncf = new Map<string, any>(
+        (setsByKind['rfce'] ?? []).map((c: any) => [String(c.ENCF), c])
+      );
+      for (const row of planRows) {
+        const isConsumo = /RFCE/i.test(String(row.doc_class ?? ''));
+        const origenEcf = ecfByEncf.get(String(row.origen_paso2));
+        if (!origenEcf) continue; // guaranteed present by upload validation
+        const reKeyed = reKeyPaso4(origenEcf, row as Paso4Plan);
+        orderedCases.push({
+          encf: String(row.nuevo_encf),
+          tipo: String(row.tipo),
+          kind: 'ecf',
+          status: skipSet.has(String(row.nuevo_encf)) ? 'skipped' : 'pending',
+          caseData: reKeyed,
+        });
+        if (isConsumo) {
+          const origenRfce = rfceByEncf.get(String(row.origen_paso2));
+          if (!origenRfce) continue; // guaranteed present by upload validation
+          const reKeyedRfce = reKeyPaso4(origenRfce, row as Paso4Plan);
+          orderedCases.push({
+            encf: String(row.nuevo_encf),
+            tipo: String(row.tipo),
+            kind: 'rfce',
+            status: skipSet.has(String(row.nuevo_encf)) ? 'skipped' : 'pending',
+            caseData: reKeyedRfce,
           });
         }
       }

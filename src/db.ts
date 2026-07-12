@@ -163,7 +163,7 @@ export async function runMigration(): Promise<void> {
     CREATE TABLE IF NOT EXISTS tenant_test_sets (
       id           BIGSERIAL PRIMARY KEY,
       rnc          TEXT NOT NULL,
-      kind         TEXT NOT NULL CHECK (kind IN ('ecf','rfce','acecf')),
+      kind         TEXT NOT NULL CHECK (kind IN ('ecf','rfce','acecf','paso4_plan')),
       cases        JSONB NOT NULL,
       case_count   INT  NOT NULL,
       source_note  TEXT,
@@ -181,7 +181,7 @@ export async function runMigration(): Promise<void> {
     CREATE TABLE IF NOT EXISTS test_runs (
       id               BIGSERIAL PRIMARY KEY,
       rnc              TEXT NOT NULL,
-      scope            TEXT NOT NULL CHECK (scope IN ('set_pruebas','acecf')),
+      scope            TEXT NOT NULL CHECK (scope IN ('set_pruebas','acecf','simulacion')),
       environment      TEXT NOT NULL,
       dry_run          BOOLEAN NOT NULL,
       actor            TEXT NOT NULL,
@@ -230,6 +230,50 @@ export async function runMigration(): Promise<void> {
   // Surface any run that was mid-flight when the process restarted.
   await db.query(`
     UPDATE test_runs SET status='interrupted', finished_at=now() WHERE status='running'
+  `);
+
+  // Widen CHECK constraints for existing DBs (idempotent — skips if already widened).
+  // Log actual constraint names for operational reporting.
+  const { rows: kindCons } = await db.query(`
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'tenant_test_sets'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%kind%'`);
+  console.log('[db] tenant_test_sets kind constraint:', kindCons[0]?.conname ?? '(none)');
+  await db.query(`
+    DO $$
+    DECLARE cname TEXT;
+    BEGIN
+      SELECT conname INTO cname FROM pg_constraint
+      WHERE conrelid = 'tenant_test_sets'::regclass AND contype = 'c'
+        AND pg_get_constraintdef(oid) LIKE '%kind%'
+        AND pg_get_constraintdef(oid) NOT LIKE '%paso4_plan%';
+      IF cname IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE tenant_test_sets DROP CONSTRAINT ' || quote_ident(cname);
+        ALTER TABLE tenant_test_sets ADD CONSTRAINT tenant_test_sets_kind_check
+          CHECK (kind IN ('ecf','rfce','acecf','paso4_plan'));
+      END IF;
+    END $$
+  `);
+
+  const { rows: scopeCons } = await db.query(`
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'test_runs'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%scope%'`);
+  console.log('[db] test_runs scope constraint:', scopeCons[0]?.conname ?? '(none)');
+  await db.query(`
+    DO $$
+    DECLARE cname TEXT;
+    BEGIN
+      SELECT conname INTO cname FROM pg_constraint
+      WHERE conrelid = 'test_runs'::regclass AND contype = 'c'
+        AND pg_get_constraintdef(oid) LIKE '%scope%'
+        AND pg_get_constraintdef(oid) NOT LIKE '%simulacion%';
+      IF cname IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE test_runs DROP CONSTRAINT ' || quote_ident(cname);
+        ALTER TABLE test_runs ADD CONSTRAINT test_runs_scope_check
+          CHECK (scope IN ('set_pruebas','acecf','simulacion'));
+      END IF;
+    END $$
   `);
 
   console.log('[db] schema OK');
