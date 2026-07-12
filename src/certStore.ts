@@ -8,36 +8,36 @@ const certCache = new Map<string, KeyMaterial>();
  * Resolution order:
  *   1. In-process cache (per restart)
  *   2. tenant_certs row in Postgres (decrypted with CERT_STORE_KEY)
- *   3. Env cert (P12_BASE64 / P12_PATH + P12_PASSWORD) — covers ADSE / RNC 133470616
- * Returns null only when no cert is available at all.
+ *   3. Env cert (P12_BASE64 / P12_PATH + P12_PASSWORD) — ANCHOR ONLY (RNC 133470616)
+ * DB errors rethrow — a database outage must never silently swap signing identities.
+ * Returns null when no cert is available (non-anchor with no DB row).
  */
 export async function keyForRnc(rnc: string): Promise<KeyMaterial | null> {
   const hit = certCache.get(rnc);
   if (hit) return hit;
 
-  try {
-    const db = getPool();
-    const { rows } = await db.query<{ p12_base64_enc: string; password_enc: string }>(
-      'SELECT p12_base64_enc, password_enc FROM tenant_certs WHERE rnc = $1',
-      [rnc]
-    );
-    if (rows.length > 0) {
-      const p12Base64 = decrypt(rows[0].p12_base64_enc);
-      const password  = decrypt(rows[0].password_enc);
-      const der = Buffer.from(p12Base64, 'base64').toString('binary');
-      const key = loadP12FromDerBinary(der, password);
-      certCache.set(rnc, key);
-      return key;
-    }
-  } catch {
-    // DB unavailable or no row — fall through to env cert
+  const db = getPool();
+  const { rows } = await db.query<{ p12_base64_enc: string; password_enc: string }>(
+    'SELECT p12_base64_enc, password_enc FROM tenant_certs WHERE rnc = $1',
+    [rnc]
+  );
+  if (rows.length > 0) {
+    const p12Base64 = decrypt(rows[0].p12_base64_enc);
+    const password  = decrypt(rows[0].password_enc);
+    const der = Buffer.from(p12Base64, 'base64').toString('binary');
+    const key = loadP12FromDerBinary(der, password);
+    certCache.set(rnc, key);
+    return key;
   }
 
-  const envKey = keyFromEnv();
-  if (envKey) {
-    certCache.set(rnc, envKey);
-    return envKey;
+  if (rnc === '133470616') {
+    const envKey = keyFromEnv();
+    if (envKey) {
+      certCache.set(rnc, envKey);
+      return envKey;
+    }
   }
+
   return null;
 }
 
@@ -110,7 +110,9 @@ export async function upsertSequence(opts: {
   );
 }
 
-/** Normalize an environment string to the canonical DB value ('certecf' or 'ecf'). */
+/** Normalize an environment string to the canonical DB value ('certecf' or 'ecf').
+ * requireEnvironment() in api.ts now rejects all unknown values at the API boundary,
+ * so inputs arriving here are guaranteed to be 'certecf' or 'ecf'. */
 export function normalizeEnv(env: string): string {
   const e = (env || '').toLowerCase().trim();
   return (e === 'ecf' || e === 'prod' || e === 'produccion' || e === 'production')

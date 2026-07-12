@@ -191,14 +191,18 @@ export function extractSignerIdentity(signedXml: string): string {
     const pem =
       `-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----`;
     const cert = forge.pki.certificateFromPem(pem);
-    // Prefer a subject attribute whose value is purely a 9 or 11-digit RNC
+    // Prefer a subject attribute whose digits-only value is exactly 9 or 11 chars
+    // (normalizes dashed cédulas like "001-1234567-8" → "00112345678").
     for (const attr of (cert.subject.attributes as forge.pki.CertificateField[])) {
-      const val = String(attr.value || '').trim();
-      if (/^\d{9}$|^\d{11}$/.test(val)) return val;
+      const digits = String(attr.value || '').replace(/\D/g, '');
+      if (/^\d{9}$|^\d{11}$/.test(digits)) return digits;
     }
-    // Fallback: extract RNC from CN like "133470616 - Company Name"
+    // Fallback: strip non-digits from CN; if exactly 9 or 11 remain, return them;
+    // otherwise try word-boundary match, then slice.
     const cn = cert.subject.getField('CN');
     if (cn) {
+      const cnDigits = String(cn.value || '').replace(/\D/g, '');
+      if (/^\d{9}$|^\d{11}$/.test(cnDigits)) return cnDigits;
       const m = String(cn.value).match(/\b(\d{9}|\d{11})\b/);
       if (m) return m[1];
       return String(cn.value).slice(0, 100);

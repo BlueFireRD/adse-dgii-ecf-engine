@@ -86,19 +86,23 @@ async function resolveKey(rnc: string): Promise<{ key: KeyMaterial; ephemeral: b
 
 /**
  * PSF endpoints must never fall back to DGII_ENV (production since go-live).
- * Returns the normalized environment string, or null when absent/blank —
- * callers must 400 on null. Accepted values (case-insensitive): ecf, prod,
- * produccion, production, certecf, testecf.
+ * Returns 'ecf' | 'certecf' for known members, 'testecf-rejected' for testecf
+ * (any case), or null for absent/blank/unknown — callers must 400 on null or sentinel.
  */
 function requireEnvironment(raw: unknown): string | null {
-  const e = typeof raw === 'string' ? raw.trim() : '';
-  return e.length > 0 ? e : null;
+  const e = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (e === 'ecf' || e === 'prod' || e === 'produccion' || e === 'production') return 'ecf';
+  if (e === 'certecf') return 'certecf';
+  if (e === 'testecf') return 'testecf-rejected';
+  return null;
 }
 
 const ENV_REQUIRED_ERROR = {
-  error:
-    'missing "environment" — this endpoint refuses to default to DGII_ENV. ' +
-    'Send environment explicitly: "testecf", "certecf", or "ecf".',
+  error: 'missing "environment" — send "certecf" or "ecf" explicitly.',
+};
+
+const TESTECF_REJECTED_ERROR = {
+  error: 'environment "testecf" is not supported: TesteCF endpoints are not configured; use "certecf"',
 };
 
 app.get('/health', (_req: Request, res: Response) => {
@@ -205,6 +209,7 @@ app.post('/submit', emisorAuth, async (req: Request, res: Response) => {
     if (!xml || !kind) return res.status(400).json({ error: 'missing "xml" or "kind"' });
     const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
+    if (env === 'testecf-rejected') return res.status(400).json(TESTECF_REJECTED_ERROR);
     const rnc = rncFromXml(xml);
     const { key, ephemeral } = await resolveKey(rnc);
     if (ephemeral) {
@@ -245,6 +250,7 @@ app.post('/emitir-consumo', emisorAuth, async (req: Request, res: Response) => {
     const { environment } = req.body;
     const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
+    if (env === 'testecf-rejected') return res.status(400).json(TESTECF_REJECTED_ERROR);
     const data = normalize(req.body);
     const rnc = data.RNCEmisor || ADSE_RNC;
     const { key, ephemeral } = await resolveKey(rnc);
@@ -326,6 +332,7 @@ app.post('/secuencias', emisorAuth, async (req: Request, res: Response) => {
     }
     const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
+    if (env === 'testecf-rejected') return res.status(400).json(TESTECF_REJECTED_ERROR);
     await upsertSequence({
       rnc: String(rnc),
       ecfType: String(ecfType),
@@ -354,6 +361,7 @@ app.post('/reservar-encf', emisorAuth, async (req: Request, res: Response) => {
     }
     const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
+    if (env === 'testecf-rejected') return res.status(400).json(TESTECF_REJECTED_ERROR);
     const encf = await reservarEncf(String(rnc), String(ecfType), env.toLowerCase());
     res.json({ encf });
   } catch (e: any) {
@@ -368,6 +376,7 @@ app.post('/consulta', emisorAuth, async (req: Request, res: Response) => {
     if (!trackId) return res.status(400).json({ error: 'missing "trackId"' });
     const env = requireEnvironment(environment);
     if (!env) return res.status(400).json(ENV_REQUIRED_ERROR);
+    if (env === 'testecf-rejected') return res.status(400).json(TESTECF_REJECTED_ERROR);
     const { key, ephemeral } = await resolveKey(rnc || ADSE_RNC);
     if (ephemeral) {
       return res.status(412).json({
