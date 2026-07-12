@@ -43,12 +43,12 @@ by server code or executed on the deployed service.
 
 ## Known sharp edges
 
-- `testecf` is accepted by API validation but **silently remapped to CerteCF hosts**
-  (`dgiiClient.endpointsFor` is binary certecf/production; `certStore.normalizeEnv`
-  collapses it). Backlog item — do not "fix" in passing.
-- `certStore.keyForRnc` falls back to the anchor env cert for **any** RNC. Backlog item.
-  New multi-tenant code paths must not rely on this fallback: require a `tenant_certs`
-  row explicitly for non-anchor RNCs.
+- `testecf` is **hard-rejected at the API boundary** by `requireEnvironment` (H4, `082c33a`).
+  `certStore.normalizeEnv` still collapses to certecf internally, but that path is
+  unreachable from validated API inputs and is not a user-facing risk.
+- `certStore.keyForRnc` env-cert fallback is **anchor-only** (RNC `133470616`) since H1
+  (`082c33a`). Non-anchor tenants with no `tenant_certs` row receive `null` → ephemeral
+  key → 412 on any DGII-submitting path.
 - `paso4_plan.json` is not in the repo (`dataset.ts` resolves it outside the repo root);
   `getPaso4Cases()` throws on Railway.
 - `RFCE_ENCFS` (`types.ts`) and the dataset files at repo root (`dataset.json`,
