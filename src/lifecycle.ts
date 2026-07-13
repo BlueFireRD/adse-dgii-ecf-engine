@@ -104,9 +104,10 @@ export async function listTenants(): Promise<Record<string, unknown>[]> {
      LEFT JOIN tenant_certs          tc ON tc.rnc = r.rnc
      ORDER BY r.created_at DESC`
   );
-  // For the anchor (no DB cert row), fill metadata from the env P12.
+  // For the anchor: prefer env metadata when no DB-sourced not_after exists
+  // (covers both "no DB row" and pre-2-E rows where metadata columns are null).
   return (rows as Record<string, unknown>[]).map(row => {
-    if (row.rnc === ANCHOR_RNC && !row.certSource) {
+    if (row.rnc === ANCHOR_RNC && !row.certNotAfter) {
       const envMeta = getEnvCertMeta();
       if (envMeta) {
         return {
