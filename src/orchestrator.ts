@@ -724,6 +724,7 @@ async function runExecutor(
         const rfceSigned = signXml(rfceUnsigned, key);
         const vrFull = validateXml(fullSigned, schemaPathForEcf('32'), c.encf);
         const vrRfce = validateXml(rfceSigned, schemaPathForRfce(), c.encf);
+        const fechaFirmaRfce = extractFechaFirma(rfceSigned);
         const qrUrl = buildFcQrUrl({
           environment: 'certecf',
           rncEmisor: String(data.RNCEmisor ?? rnc),
@@ -737,14 +738,14 @@ async function runExecutor(
           await updateCase(runId, pos, {
             status: 'error', error: errors.join('; '),
             full_invoice_xml: fullSigned, signed_xml: rfceSigned,
-            codigo_seguridad: codigoSeguridad, qr_url: qrUrl,
+            codigo_seguridad: codigoSeguridad, fecha_firma: fechaFirmaRfce, qr_url: qrUrl,
           });
         } else {
           c.status = dryRun ? 'skipped' : 'pending';
           await updateCase(runId, pos, {
             status: dryRun ? 'skipped' : 'pending',
             full_invoice_xml: fullSigned, signed_xml: rfceSigned,
-            codigo_seguridad: codigoSeguridad, qr_url: qrUrl,
+            codigo_seguridad: codigoSeguridad, fecha_firma: fechaFirmaRfce, qr_url: qrUrl,
             mensajes: dryRun ? { dryRun: true, xsd: 'valid' } : null,
           });
           cases[i] = { ...c, status: c.status };
