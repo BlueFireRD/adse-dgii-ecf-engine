@@ -1,4 +1,32 @@
+import * as forge from 'node-forge';
 import { getPool } from './db';
+import { keyFromEnv } from './signer';
+
+const ANCHOR_RNC = '133470616';
+
+// Lazily-computed, module-cached env-cert metadata for the anchor.
+// undefined = not yet attempted; null = attempt failed or env not set.
+let _envCertMeta: { subject: string | null; notAfter: string | null } | null | undefined =
+  undefined;
+
+function getEnvCertMeta(): { subject: string | null; notAfter: string | null } | null {
+  if (_envCertMeta !== undefined) return _envCertMeta;
+  try {
+    const km = keyFromEnv();
+    if (!km) { _envCertMeta = null; return null; }
+    const cert = forge.pki.certificateFromPem(km.certPem);
+    const cnAttr = cert.subject.getField('CN');
+    const subject =
+      (cnAttr?.value as string | undefined) ||
+      cert.subject.attributes.map((a: any) => a.value).filter(Boolean).join(', ') ||
+      null;
+    _envCertMeta = { subject, notAfter: cert.validity.notAfter?.toISOString() ?? null };
+  } catch (e) {
+    console.error('[lifecycle] env cert metadata read failed:', (e as any)?.message);
+    _envCertMeta = null;
+  }
+  return _envCertMeta;
+}
 
 export const STATES: string[] = [
   'prerequisites_check',
@@ -56,7 +84,7 @@ export async function upsertTenant(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// GET /tenants — registry list LEFT JOINed to cert state
+// GET /tenants — registry list LEFT JOINed to cert state + cert metadata
 // ---------------------------------------------------------------------------
 export async function listTenants(): Promise<Record<string, unknown>[]> {
   const db = getPool();
@@ -66,12 +94,32 @@ export async function listTenants(): Promise<Record<string, unknown>[]> {
             r.channel,
             r.status,
             c.state          AS "certState",
-            c.updated_at     AS "certUpdatedAt"
+            c.updated_at     AS "certUpdatedAt",
+            tc.subject       AS "certSubject",
+            tc.not_after     AS "certNotAfter",
+            tc.updated_at    AS "certFileUpdatedAt",
+            CASE WHEN tc.rnc IS NOT NULL THEN 'db' ELSE NULL END AS "certSource"
      FROM tenant_registry r
-     LEFT JOIN tenant_certifications c ON c.rnc = r.rnc
+     LEFT JOIN tenant_certifications c  ON c.rnc  = r.rnc
+     LEFT JOIN tenant_certs          tc ON tc.rnc = r.rnc
      ORDER BY r.created_at DESC`
   );
-  return rows as Record<string, unknown>[];
+  // For the anchor (no DB cert row), fill metadata from the env P12.
+  return (rows as Record<string, unknown>[]).map(row => {
+    if (row.rnc === ANCHOR_RNC && !row.certSource) {
+      const envMeta = getEnvCertMeta();
+      if (envMeta) {
+        return {
+          ...row,
+          certSubject:       envMeta.subject,
+          certNotAfter:      envMeta.notAfter,
+          certFileUpdatedAt: null,
+          certSource:        'env',
+        };
+      }
+    }
+    return row;
+  });
 }
 
 // ---------------------------------------------------------------------------

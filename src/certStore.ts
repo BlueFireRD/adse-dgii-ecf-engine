@@ -44,18 +44,26 @@ export async function keyForRnc(rnc: string): Promise<KeyMaterial | null> {
 /**
  * Store or replace a tenant cert (p12 as raw base64, password in clear-text).
  * Both values are encrypted with AES-256-GCM before writing.
+ * Optional meta carries the already-parsed subject and notAfter from api.ts.
  * Clears the in-process cache entry so the next keyForRnc re-reads from DB.
  */
-export async function upsertCert(rnc: string, p12Base64: string, password: string): Promise<void> {
+export async function upsertCert(
+  rnc: string,
+  p12Base64: string,
+  password: string,
+  meta?: { subject?: string | null; notAfter?: Date | null }
+): Promise<void> {
   const db = getPool();
   await db.query(
-    `INSERT INTO tenant_certs (rnc, p12_base64_enc, password_enc, updated_at)
-     VALUES ($1, $2, $3, now())
+    `INSERT INTO tenant_certs (rnc, p12_base64_enc, password_enc, subject, not_after, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now())
      ON CONFLICT (rnc) DO UPDATE SET
        p12_base64_enc = EXCLUDED.p12_base64_enc,
        password_enc   = EXCLUDED.password_enc,
+       subject        = EXCLUDED.subject,
+       not_after      = EXCLUDED.not_after,
        updated_at     = now()`,
-    [rnc, encrypt(p12Base64), encrypt(password)]
+    [rnc, encrypt(p12Base64), encrypt(password), meta?.subject ?? null, meta?.notAfter ?? null]
   );
   certCache.delete(rnc);
 }

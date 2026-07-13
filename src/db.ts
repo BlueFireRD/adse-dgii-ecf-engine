@@ -276,5 +276,9 @@ export async function runMigration(): Promise<void> {
     END $$
   `);
 
+  // 2-E: additive cert metadata columns (idempotent via IF NOT EXISTS).
+  await db.query(`ALTER TABLE tenant_certs ADD COLUMN IF NOT EXISTS subject   TEXT`);
+  await db.query(`ALTER TABLE tenant_certs ADD COLUMN IF NOT EXISTS not_after TIMESTAMPTZ`);
+
   console.log('[db] schema OK');
 }

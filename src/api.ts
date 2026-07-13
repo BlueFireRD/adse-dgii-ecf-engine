@@ -297,23 +297,40 @@ app.post('/certs', emisorAuth, async (req: Request, res: Response) => {
     if (!rnc || !p12Base64 || !password) {
       return res.status(400).json({ error: 'missing required fields: rnc, p12Base64, password' });
     }
-    // Validate the P12 opens with this password BEFORE storing anything.
+    // Parse the P12 and extract cert metadata BEFORE storing anything.
     let subject = '';
     let notAfter: Date | null = null;
+    let certIdentity: string | null = null;
     try {
       const der = Buffer.from(String(p12Base64), 'base64').toString('binary');
       const km = loadP12FromDerBinary(der, String(password));
       const cert = forge.pki.certificateFromPem(km.certPem);
-      const cn = cert.subject.getField('CN');
-      subject = (cn && cn.value) || cert.subject.attributes.map((a: any) => a.value).filter(Boolean).join(', ');
+      const cnAttr = cert.subject.getField('CN');
+      const serialAttr = cert.subject.getField('serialNumber');
+      subject = (cnAttr?.value as string | undefined) ||
+        cert.subject.attributes.map((a: any) => a.value).filter(Boolean).join(', ');
       notAfter = cert.validity.notAfter;
+      // Identity: serialNumber preferred (DGII-issued certs), then CN, then any attr
+      const rawIdentity =
+        (serialAttr?.value as string | undefined) ||
+        (cnAttr?.value as string | undefined) ||
+        cert.subject.attributes.map((a: any) => String(a.value || '')).find(v => /\d{9,11}/.test(v)) ||
+        '';
+      certIdentity = rawIdentity.replace(/\D/g, '') || null;
     } catch (_ve) {
       return res.status(422).json({ error: 'invalid_p12_or_password' });
+    }
+    // Identity cross-check AFTER the parse block so parse errors stay distinct.
+    if (!certIdentity) {
+      return res.status(422).json({ error: 'cert_identity_unreadable' });
+    }
+    if (certIdentity !== String(rnc)) {
+      return res.status(422).json({ error: 'cert_rnc_mismatch', certIdentity });
     }
     if (notAfter && notAfter.getTime() <= Date.now()) {
       return res.status(422).json({ error: 'certificate_expired', subject, notAfter: notAfter.toISOString() });
     }
-    await upsertCert(String(rnc), String(p12Base64), String(password));
+    await upsertCert(String(rnc), String(p12Base64), String(password), { subject, notAfter });
     res.json({ ok: true, subject, notAfter: notAfter ? notAfter.toISOString() : null });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
