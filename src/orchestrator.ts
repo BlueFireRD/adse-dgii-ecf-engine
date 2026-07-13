@@ -724,7 +724,7 @@ async function runExecutor(
         const rfceSigned = signXml(rfceUnsigned, key);
         const vrFull = validateXml(fullSigned, schemaPathForEcf('32'), c.encf);
         const vrRfce = validateXml(rfceSigned, schemaPathForRfce(), c.encf);
-        const fechaFirmaRfce = extractFechaFirma(rfceSigned);
+        const fechaFirmaRfce = extractFechaFirma(fullSigned);
         const qrUrl = buildFcQrUrl({
           environment: 'certecf',
           rncEmisor: String(data.RNCEmisor ?? rnc),
