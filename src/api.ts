@@ -320,18 +320,21 @@ app.post('/certs', emisorAuth, async (req: Request, res: Response) => {
     } catch (_ve) {
       return res.status(422).json({ error: 'invalid_p12_or_password' });
     }
-    // Identity cross-check AFTER the parse block so parse errors stay distinct.
-    if (!certIdentity) {
+    // Length-aware identity check AFTER the parse block so parse errors stay distinct.
+    const normalizedRnc = String(rnc).replace(/\D/g, '');
+    if (!certIdentity || (certIdentity.length !== 9 && certIdentity.length !== 11)) {
       return res.status(422).json({ error: 'cert_identity_unreadable' });
     }
-    if (certIdentity !== String(rnc)) {
+    if (certIdentity.length === 9 && certIdentity !== normalizedRnc) {
+      // 9-digit = company RNC: must match the target RNC exactly.
       return res.status(422).json({ error: 'cert_rnc_mismatch', certIdentity });
     }
+    // 11-digit = cédula (personal-linked cert): accepted for any company RNC.
     if (notAfter && notAfter.getTime() <= Date.now()) {
       return res.status(422).json({ error: 'certificate_expired', subject, notAfter: notAfter.toISOString() });
     }
     await upsertCert(String(rnc), String(p12Base64), String(password), { subject, notAfter });
-    res.json({ ok: true, subject, notAfter: notAfter ? notAfter.toISOString() : null });
+    res.json({ ok: true, subject, notAfter: notAfter ? notAfter.toISOString() : null, certIdentity });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
