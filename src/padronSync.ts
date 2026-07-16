@@ -2,7 +2,7 @@ import { unzipSync } from 'fflate';
 import * as iconv from 'iconv-lite';
 
 export interface PadronTarget {
-  name: 'pos' | 'crm';
+  name: 'pos' | 'crm' | 'factura';
   ingestUrl: string;
   mapRow: (parts: string[]) => Record<string, unknown>;
 }
@@ -243,6 +243,17 @@ function crmMapRow(parts: string[]): Record<string, unknown> {
   };
 }
 
+function facturaMapRow(parts: string[]): Record<string, unknown> {
+  return {
+    rnc:              parts[0],
+    razon_social:     parts[1],
+    nombre_comercial: parts[2] || null,
+    actividad:        parts[3] || null,
+    estado:           parts[9] || null,
+    regimen:          parts[10] || null,
+  };
+}
+
 /** Returns all enabled targets based on configured env vars. */
 export function buildTargets(): PadronTarget[] {
   const targets: PadronTarget[] = [];
@@ -260,6 +271,14 @@ export function buildTargets(): PadronTarget[] {
       name:      'crm',
       ingestUrl: process.env.CRM_INGEST_URL,
       mapRow:    crmMapRow,
+    });
+  }
+
+  if (process.env.FACTURA_INGEST_URL) {
+    targets.push({
+      name:      'factura',
+      ingestUrl: process.env.FACTURA_INGEST_URL,
+      mapRow:    facturaMapRow,
     });
   }
 

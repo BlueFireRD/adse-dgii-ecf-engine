@@ -162,7 +162,7 @@ async function runJob(activeRuns: ActiveRun[]): Promise<void> {
 padronRouter.post('/padron/sync', padronAuth, async (req: Request, res: Response) => {
   const targets = buildTargets();
   if (targets.length === 0) {
-    return res.status(503).json({ error: 'no targets configured (POS_INGEST_URL / CRM_INGEST_URL)' });
+    return res.status(503).json({ error: 'no targets configured (POS_INGEST_URL / CRM_INGEST_URL / FACTURA_INGEST_URL)' });
   }
 
   const { runs, activeRuns } = await beginAll(targets, 'manual');
