@@ -417,7 +417,7 @@ app.post('/consulta', emisorAuth, async (req: Request, res: Response) => {
 
 const VALID_RNC_RE = /^\d{9}$|^\d{11}$/;
 const VALID_REGISTRY_STATUSES = new Set(['onboarding', 'active', 'offboarding', 'closed']);
-const VALID_CHANNELS = new Set(['crm', 'pos', 'external_api']);
+const VALID_CHANNELS = new Set(['crm', 'pos', 'external_api', 'factura']);
 
 /** POST /tenants — upsert registry row. */
 app.post('/tenants', emisorAuth, async (req: Request, res: Response) => {

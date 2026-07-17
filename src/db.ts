@@ -91,7 +91,7 @@ export async function runMigration(): Promise<void> {
       rnc          TEXT PRIMARY KEY,
       display_name TEXT,
       channel      TEXT NOT NULL DEFAULT 'crm'
-                   CHECK (channel IN ('crm','pos','external_api')),
+                   CHECK (channel IN ('crm','pos','external_api','factura')),
       status       TEXT NOT NULL DEFAULT 'onboarding'
                    CHECK (status IN ('onboarding','active','offboarding','closed')),
       created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -279,6 +279,28 @@ export async function runMigration(): Promise<void> {
   // 2-E: additive cert metadata columns (idempotent via IF NOT EXISTS).
   await db.query(`ALTER TABLE tenant_certs ADD COLUMN IF NOT EXISTS subject   TEXT`);
   await db.query(`ALTER TABLE tenant_certs ADD COLUMN IF NOT EXISTS not_after TIMESTAMPTZ`);
+
+  // D-SF-5: widen tenant_registry.channel to include 'factura' (idempotent).
+  const { rows: channelCons } = await db.query(`
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'tenant_registry'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%channel%'`);
+  console.log('[db] tenant_registry channel constraint:', channelCons[0]?.conname ?? '(none)');
+  await db.query(`
+    DO $$
+    DECLARE cname TEXT;
+    BEGIN
+      SELECT conname INTO cname FROM pg_constraint
+      WHERE conrelid = 'tenant_registry'::regclass AND contype = 'c'
+        AND pg_get_constraintdef(oid) LIKE '%channel%'
+        AND pg_get_constraintdef(oid) NOT LIKE '%factura%';
+      IF cname IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE tenant_registry DROP CONSTRAINT ' || quote_ident(cname);
+        ALTER TABLE tenant_registry ADD CONSTRAINT tenant_registry_channel_check
+          CHECK (channel IN ('crm','pos','external_api','factura'));
+      END IF;
+    END $$
+  `);
 
   console.log('[db] schema OK');
 }
