@@ -921,11 +921,12 @@ async function runExecutor(
         try { mensajes = JSON.parse(result.body); } catch { mensajes = result.body; }
 
         const parsedAcecf: any = typeof mensajes === 'object' ? mensajes : {};
+        const codigoAcecf = String(parsedAcecf?.codigo ?? '').trim();
         const estadoAcecf = String(parsedAcecf?.estado ?? parsedAcecf?.Estado ?? '').trim().toLowerCase();
-        if (estadoAcecf.startsWith('aceptado')) {
-          c.status = 'aceptado';
-        } else if (estadoAcecf === 'rechazado') {
+        if (estadoAcecf.includes('rechaz') || estadoAcecf.includes('no aprobada')) {
           c.status = 'rechazado';
+        } else if (codigoAcecf === '01' || estadoAcecf.startsWith('aceptado') || estadoAcecf.includes('aprobada')) {
+          c.status = 'aceptado';
         } else {
           c.status = 'error';
         }
