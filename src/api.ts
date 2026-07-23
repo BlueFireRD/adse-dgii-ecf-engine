@@ -310,13 +310,18 @@ app.post('/certs', emisorAuth, async (req: Request, res: Response) => {
       subject = (cnAttr?.value as string | undefined) ||
         cert.subject.attributes.map((a: any) => a.value).filter(Boolean).join(', ');
       notAfter = cert.validity.notAfter;
-      // Identity: serialNumber preferred (DGII-issued certs), then CN, then any attr
-      const rawIdentity =
-        (serialAttr?.value as string | undefined) ||
-        (cnAttr?.value as string | undefined) ||
-        cert.subject.attributes.map((a: any) => String(a.value || '')).find(v => /\d{9,11}/.test(v)) ||
-        '';
-      certIdentity = rawIdentity.replace(/\D/g, '') || null;
+      // Identity: OID 2.5.4.5 (SERIALNUMBER) first — bypasses forge's shortName:undefined
+      // quirk for that OID. Bare attribute scan is the fallback only; it is ordered
+      // by OID-first to prevent a STREET value that strips to 11 digits from silently
+      // taking the cédula branch and bypassing the RNC cross-check.
+      const digitsOf = (v: any) => String(v || '').replace(/\D/g, '');
+      const isId = (d: string) => /^\d{9}$|^\d{11}$/.test(d);
+      const serialDigits = digitsOf(
+        cert.subject.attributes.find((a: any) => a.type === '2.5.4.5')?.value
+      );
+      certIdentity = isId(serialDigits)
+        ? serialDigits
+        : (cert.subject.attributes.map((a: any) => digitsOf(a.value)).find(isId) ?? null);
     } catch (_ve) {
       return res.status(422).json({ error: 'invalid_p12_or_password' });
     }
