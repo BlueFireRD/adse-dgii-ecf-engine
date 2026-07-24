@@ -540,13 +540,15 @@ async function handleStartRun(req: Request, res: Response): Promise<void> {
         const origenEcf = ecfByEncf.get(String(row.origen_paso2));
         if (!origenEcf) continue; // guaranteed present by upload validation
         const reKeyed = reKeyPaso4(origenEcf, row as Paso4Plan);
-        orderedCases.push({
-          encf: String(row.nuevo_encf),
-          tipo: String(row.tipo),
-          kind: 'ecf',
-          status: skipSet.has(String(row.nuevo_encf)) ? 'skipped' : 'pending',
-          caseData: reKeyed,
-        });
+        if (!isConsumo) {
+          orderedCases.push({
+            encf: String(row.nuevo_encf),
+            tipo: String(row.tipo),
+            kind: 'ecf',
+            status: skipSet.has(String(row.nuevo_encf)) ? 'skipped' : 'pending',
+            caseData: reKeyed,
+          });
+        }
         if (isConsumo) {
           const origenRfce = rfceByEncf.get(String(row.origen_paso2));
           if (!origenRfce) continue; // guaranteed present by upload validation
